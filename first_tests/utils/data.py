@@ -163,27 +163,49 @@ def dataset_summary(
 
 def build_examples(
     config: str = "electricity_H_long",
-    n_samples: int = DEFAULT_CONFIG["N_SAMPLES_TO_LOAD"],
-    subsample_step: int = 5,
+    start: int = 0,
+    stop: int | None = None,
+    step: int = 1,
     dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
 ) -> list[dict[str, Any]]:
     """
     Full pipeline: load → clean → align lengths → normalise.
+
+    Only fetches the slice ``train[start:stop]`` from HuggingFace, then
+    applies *step* to subsample within that range.
+
+    Parameters
+    ----------
+    config : str
+        Dataset configuration name.
+    start, stop : int
+        Row range to load (HF split slicing). *stop* defaults to start + 1000.
+    step : int
+        Keep every *step*‑th row inside the loaded range (1 = keep all).
+    dataset_name : str
+        HuggingFace dataset identifier.
 
     Returns a list of dicts, each containing:
         sample_idx, history, future,
         history_model, future_model,
         history_n, future_n, mu, sigma
     """
-    ds = load_gift_dataset(config, n_samples, dataset_name)
-    ds = ds.select(range(0, len(ds), subsample_step))
+    if stop is None:
+        stop = start + 1000
+    split = f"train[{start}:{stop}]"
+    ds = load_dataset(dataset_name, config, split=split)
+
+    indices = range(0, len(ds), step)
+    ds = ds.select(indices)
 
     raw: list[dict[str, Any]] = []
-    for idx, sample in enumerate(ds):
+    for local_idx, sample in enumerate(ds):
         h, f = extract_history_future(sample)
         if len(h) == 0 or len(f) == 0:
             continue
-        raw.append({"sample_idx": idx, "history": h, "future": f})
+        # sample_idx is the global index in the dataset
+        global_idx = start + indices[local_idx]
+        raw.append({"sample_idx": global_idx, "history": h, "future": f})
 
     if not raw:
         return []
