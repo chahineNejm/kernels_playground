@@ -331,3 +331,180 @@ def plot_predictions_for_domain(
     if show:
         plt.show()
     return fig
+
+
+# ===================================================================
+# FULL EVAL REPORT FROM TrainEvalResult
+# ===================================================================
+
+def report_eval(
+    result,
+    *,
+    n_preview: int = 6,
+    history_context: int = DEFAULT_CONFIG["HISTORY_CONTEXT_TO_PLOT"],
+    show: bool = True,
+):
+    """
+    One-call diagnostic dashboard for a TrainEvalResult.
+
+    Produces (in order):
+        1. Summary stats printout
+        2. Train / test split bar
+        3. Grid of a few test predictions (actual vs predicted)
+        4. relRMSE bar chart across all test samples
+        5. Residual scatter + histogram (aggregated over all test samples)
+        6. RMSE vs relRMSE scatter (per test sample)
+
+    Parameters
+    ----------
+    result : TrainEvalResult
+        Output of pipeline.train_eval.
+    n_preview : int
+        How many test samples to show in the prediction grid.
+    history_context : int
+        How much history tail to show in prediction panels.
+    show : bool
+        Call plt.show() after each figure.
+
+    Returns
+    -------
+    dict of str -> Figure  (keyed by plot name, for further tweaking)
+    """
+    domain = result.domain or "eval"
+    preds = result.predictions
+    figs = {}
+
+    # -- 1. print summary -------------------------------------
+    s = result.summary()
+    print(f"{'=' * 50}")
+    print(f"  {domain}")
+    print(f"  train: {s['n_train']}   test: {s['n_test']}")
+    print(f"  lengthscale: {s['lengthscale']:.4f}   gamma: {s['gamma']:.2e}")
+    print(f"  mean RMSE:     {s['mean_rmse']:.4f}")
+    print(f"  mean relRMSE:  {s['mean_relRMSE']:.4f}")
+    print(f"  median relRMSE:{s['median_relRMSE']:.4f}")
+    print(f"{'=' * 50}")
+
+    # -- 2. train / test split bar -----------------------------
+    figs["split"] = plot_train_test_split(
+        len(result.examples),
+        result.train_indices,
+        result.test_indices,
+        title=f"{domain} -- train / test split",
+        show=show,
+    )
+
+    # -- 3. prediction preview grid ----------------------------
+    n_show = min(n_preview, len(result.test_records))
+    rows_grid = int(np.ceil(n_show / 3))
+    fig_prev, axes_prev = plt.subplots(
+        rows_grid, 3,
+        figsize=(14, 3.5 * rows_grid),
+        squeeze=False,
+    )
+    for i in range(rows_grid * 3):
+        ax = axes_prev[i // 3, i % 3]
+        if i >= n_show:
+            ax.set_visible(False)
+            continue
+        rec = result.test_records[i]
+        pred = preds[i]
+        h = rec["history"][-min(history_context, len(rec["history"])):]
+        h_x = np.arange(-len(h), 0)
+        f_x = np.arange(len(pred["future_true_model"]))
+
+        ax.plot(h_x, h, color="0.65", lw=1, label="history")
+        ax.plot(f_x, pred["future_true_model"], color="black", lw=1.4, label="actual")
+        ax.plot(f_x, pred["future_pred"], color="tab:orange", ls="--", lw=1.4, label="predicted")
+        ax.axvline(0, color="tab:blue", ls=":", lw=0.8)
+        ax.set_title(
+            f"sample {rec.get('sample_idx', i)} | relRMSE={pred['relative_rmse']:.3f}",
+            fontsize=9,
+        )
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.2)
+        if i == 0:
+            ax.legend(fontsize=7, loc="upper right")
+
+    fig_prev.suptitle(f"{domain} -- prediction preview", fontsize=12)
+    fig_prev.tight_layout(rect=(0, 0, 1, 0.96))
+    if show:
+        plt.show()
+    figs["prediction_preview"] = fig_prev
+
+    # -- 4. relRMSE bar chart ---------------------------------
+    figs["metric_bars"] = plot_metric_summary(
+        preds,
+        metric="relative_rmse",
+        title=f"{domain} -- relRMSE per test sample",
+        show=show,
+    )
+
+    # -- 5. aggregated residuals -------------------------------
+    all_true = np.concatenate([p["future_true_model"] for p in preds])
+    all_pred = np.concatenate([p["future_pred"] for p in preds])
+    figs["residuals"] = plot_residuals(
+        all_true, all_pred,
+        title=f"{domain} -- residuals (all test samples)",
+        show=show,
+    )
+
+    # -- 6. RMSE vs relRMSE scatter ----------------------------
+    rmses = [p["rmse"] for p in preds]
+    rel_rmses = [p["relative_rmse"] for p in preds]
+    fig_sc, ax_sc = plt.subplots(figsize=(6, 5))
+    ax_sc.scatter(rmses, rel_rmses, s=20, alpha=0.6, color="tab:orange")
+    ax_sc.set_xlabel("RMSE")
+    ax_sc.set_ylabel("relative RMSE")
+    ax_sc.set_title(f"{domain} -- RMSE vs relRMSE")
+    ax_sc.grid(True, alpha=0.2)
+    fig_sc.tight_layout()
+    if show:
+        plt.show()
+    figs["rmse_vs_relrmse"] = fig_sc
+
+    return figs
+
+
+def compare_results(
+    results: dict,
+    *,
+    metric: str = "relative_rmse",
+    show: bool = True,
+) -> plt.Figure:
+    """
+    Side-by-side box plots comparing a metric across multiple domains.
+
+    Parameters
+    ----------
+    results : dict[str, TrainEvalResult]
+        Output of pipeline.run_all_domains.
+    metric : str
+        Key in each prediction dict to compare.
+    show : bool
+        Call plt.show().
+
+    Returns
+    -------
+    Figure
+    """
+    labels = []
+    data = []
+    for domain, result in results.items():
+        vals = [p[metric] for p in result.predictions]
+        labels.append(f"{domain}\n(n={len(vals)})")
+        data.append(vals)
+
+    fig, ax = plt.subplots(figsize=(max(4, 2.5 * len(labels)), 5))
+    bp = ax.boxplot(data, labels=labels, patch_artist=True, widths=0.5)
+    colors = plt.cm.Set2(np.linspace(0, 1, len(labels)))
+    for patch, c in zip(bp["boxes"], colors):
+        patch.set_facecolor(c)
+        patch.set_alpha(0.7)
+    ax.set_ylabel(metric)
+    ax.set_title(f"{metric} across domains")
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig
