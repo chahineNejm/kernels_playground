@@ -1,17 +1,17 @@
 """
-Visualization helpers for the kernel‑operator playground.
+Visualization helpers for the kernel-operator playground.
 
 Existing (from notebook):
-    plot_predictions_for_domain – tall strip of per‑sample prediction plots
+    plot_predictions_for_domain - tall strip of per-sample prediction plots
 
 New convenience functions:
-    plot_series            – quick single‑series (history + future) view
-    plot_series_grid       – grid of N sample series at a glance
-    plot_distribution      – histogram + box‑plot of a 1‑D array
-    plot_train_test_split  – visual confirmation of train / test partition
-    plot_kernel_heatmap    – heatmap of a Gram or kernel matrix
-    plot_residuals         – residuals scatter + histogram
-    plot_metric_summary    – bar chart of RMSE / relRMSE per sample
+    plot_series            - quick single-series (history + future) view
+    plot_series_grid       - grid of N sample series at a glance
+    plot_distribution      - histogram + box-plot of a 1-D array
+    plot_train_test_split  - visual confirmation of train / test partition
+    plot_kernel_heatmap    - heatmap of a Gram or kernel matrix
+    plot_residuals         - residuals scatter + histogram
+    plot_metric_summary    - bar chart of RMSE / relRMSE per sample
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ import matplotlib.pyplot as plt
 from utils.config import DEFAULT_CONFIG
 
 
-# ═══════════════════════════════════════════════════════════════
-# SINGLE‑SERIES QUICK VIEW
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
+# SINGLE-SERIES QUICK VIEW
+# ===================================================================
 
 def plot_series(
     history: np.ndarray,
@@ -65,9 +65,9 @@ def plot_series(
     return fig
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # GRID OF SAMPLES
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def plot_series_grid(
     examples: Sequence[dict],
@@ -91,7 +91,7 @@ def plot_series_grid(
     if indices is not None:
         plot_examples = []
         for idx in indices:
-            ex = examples[idx].copy() # Don't overwrite the original data
+            ex = examples[idx].copy()
             if "sample_idx" not in ex:
                 ex["sample_idx"] = idx
             plot_examples.append(ex)
@@ -112,47 +112,44 @@ def plot_series_grid(
 
     for i in range(rows * cols):
         ax = axes[i // cols, i % cols]
-        
-        # Hide extra subplots if n doesn't perfectly divide by cols
+
         if i >= n:
             ax.set_visible(False)
             continue
-            
+
         ex = plot_examples[i]
-        
-        # 2. History context logic: Take all if None, otherwise slice
+
         if history_context is None:
             h = ex["history"]
         else:
             h = ex["history"][-history_context:]
-            
+
         h_x = np.arange(-len(h), 0)
         f_x = np.arange(len(ex["future"]))
-        
+
         ax.plot(h_x, h, color="0.6", lw=1)
         ax.plot(f_x, ex["future"], color="black", lw=1.4)
         ax.axvline(0, color="tab:blue", ls=":", lw=0.8)
-        
-        # 3. Ensure the title correctly reflects the original data index
-        original_idx = ex.get('sample_idx', i if indices is None else indices[i])
+
+        original_idx = ex.get("sample_idx", i if indices is None else indices[i])
         ax.set_title(f"sample {original_idx}", fontsize=9)
-        
+
         ax.tick_params(labelsize=7)
         ax.grid(True, alpha=0.2)
 
     fig.suptitle("Sample series grid", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    
-    # 4. Fix Jupyter double-plotting
+
     if show:
         plt.show()
-        return None # Prevent Jupyter from re-rendering the returned Figure
-    
+        return None
+
     return fig
 
-# ═══════════════════════════════════════════════════════════════
+
+# ===================================================================
 # DISTRIBUTION PLOT
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def plot_distribution(
     values: np.ndarray,
@@ -161,7 +158,7 @@ def plot_distribution(
     bins: int = 50,
     show: bool = True,
 ) -> plt.Figure:
-    """Histogram + horizontal box‑plot of a 1‑D array."""
+    """Histogram + horizontal box-plot of a 1-D array."""
     values = np.asarray(values, dtype=float).ravel()
     fig, (ax_hist, ax_box) = plt.subplots(
         2, 1, figsize=(10, 4), sharex=True,
@@ -178,9 +175,9 @@ def plot_distribution(
     return fig
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # TRAIN / TEST SPLIT VISUALIZATION
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def plot_train_test_split(
     n_total: int,
@@ -190,11 +187,11 @@ def plot_train_test_split(
     title: str = "train / test split",
     show: bool = True,
 ) -> plt.Figure:
-    """Colour‑coded bar showing which indices are train vs test."""
+    """Colour-coded bar showing which indices are train vs test."""
     fig, ax = plt.subplots(figsize=(12, 1.2))
-    colours = np.full(n_total, 0.85)  # grey = unused
-    colours[train_indices] = 0.35      # dark = train
-    colours[test_indices] = 0.0        # black = test
+    colours = np.full(n_total, 0.85)
+    colours[train_indices] = 0.35
+    colours[test_indices] = 0.0
     ax.imshow(
         colours[None, :], aspect="auto", cmap="gray", vmin=0, vmax=1,
         extent=[0, n_total, 0, 1],
@@ -208,9 +205,9 @@ def plot_train_test_split(
     return fig
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # KERNEL / GRAM MATRIX HEATMAP
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def plot_kernel_heatmap(
     matrix: np.ndarray,
@@ -232,9 +229,9 @@ def plot_kernel_heatmap(
     return fig
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # RESIDUAL DIAGNOSTICS
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def plot_residuals(
     y_true: np.ndarray,
@@ -265,9 +262,9 @@ def plot_residuals(
     return fig
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # METRIC BAR CHART
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def plot_metric_summary(
     predictions: Sequence[dict],
@@ -276,7 +273,7 @@ def plot_metric_summary(
     title: str | None = None,
     show: bool = True,
 ) -> plt.Figure:
-    """Bar chart of a per‑sample metric (e.g. relRMSE) from a predictions list."""
+    """Bar chart of a per-sample metric (e.g. relRMSE) from a predictions list."""
     vals = [p[metric] for p in predictions]
     fig, ax = plt.subplots(figsize=(max(6, len(vals) * 0.25), 4))
     ax.bar(range(len(vals)), vals, color="tab:orange", edgecolor="white", lw=0.4)
@@ -290,9 +287,9 @@ def plot_metric_summary(
     return fig
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # ORIGINAL NOTEBOOK PLOT (kept for compatibility)
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def plot_predictions_for_domain(
     domain: str,
@@ -302,7 +299,7 @@ def plot_predictions_for_domain(
     history_context: int = DEFAULT_CONFIG["HISTORY_CONTEXT_TO_PLOT"],
     show: bool = True,
 ) -> plt.Figure:
-    """Tall multi‑panel figure: one subplot per test sample."""
+    """Tall multi-panel figure: one subplot per test sample."""
     n = len(records)
     fig, axes = plt.subplots(n, 1, figsize=(12, 4.2 * n), squeeze=False)
     axes = axes[:, 0]
@@ -322,9 +319,9 @@ def plot_predictions_for_domain(
         ax.set_title(
             f"{domain} | sample {record['sample_idx']} "
             f"| RMSE={pred['rmse']:.4f} | relRMSE={pred['relative_rmse']:.4f} "
-            f"| ℓ={pred['lengthscale']:.4f}"
+            f"| l={pred['lengthscale']:.4f}"
         )
-        ax.set_xlabel("time index relative to T₁")
+        ax.set_xlabel("time index relative to T1")
         ax.set_ylabel("value")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper right")

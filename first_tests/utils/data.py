@@ -1,14 +1,14 @@
 """
-Data loading, cleaning, and quick‑access helpers for GiftEvalParquet.
+Data loading, cleaning, and quick-access helpers for GiftEvalParquet.
 
 Core helpers (from the original notebook):
     clean_series, extract_history_future, normalize_by_history, resample_series
 
 Fast dataset access:
-    load_gift_dataset   – cached HuggingFace loader (returns a datasets.Dataset)
-    quick_peek          – grab a single sample's history/future arrays
-    dataset_summary     – length / NaN / range stats for the first N samples
-    build_examples      – full pipeline: load → clean → normalise → split
+    load_gift_dataset   - cached HuggingFace loader (returns a datasets.Dataset)
+    quick_peek          - grab a single sample's history/future arrays
+    dataset_summary     - length / NaN / range stats for the first N samples
+    build_examples      - full pipeline: load -> clean -> normalise -> split
 """
 
 from __future__ import annotations
@@ -22,12 +22,12 @@ from datasets import load_dataset
 from utils.config import DEFAULT_CONFIG
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # CLEANING / TRANSFORM HELPERS
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def clean_series(x: np.ndarray) -> np.ndarray:
-    """Interpolate NaN / Inf values in a 1‑D series."""
+    """Interpolate NaN / Inf values in a 1-D series."""
     x = np.asarray(x, dtype=float).ravel().copy()
     if x.size == 0:
         return x
@@ -56,7 +56,7 @@ def normalize_by_history(
     history: np.ndarray,
     future: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, float, float]:
-    """Z‑normalise history & future using history statistics."""
+    """Z-normalise history & future using history statistics."""
     mu = float(np.mean(history))
     sigma = float(np.std(history))
     if sigma < 1e-8:
@@ -65,7 +65,7 @@ def normalize_by_history(
 
 
 def resample_series(x: np.ndarray, target_len: int) -> np.ndarray:
-    """Linearly resample *x* to *target_len* points."""
+    """Linearly resample x to target_len points."""
     x = np.asarray(x, dtype=float).ravel()
     if target_len <= 0:
         raise ValueError("target_len must be positive")
@@ -78,28 +78,27 @@ def resample_series(x: np.ndarray, target_len: int) -> np.ndarray:
     return np.interp(dst, src, x)
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # CONFIG NAME RESOLUTION
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 def resolve_config(name: str) -> str:
     """
     Accept either a friendly name ("Energy") or a raw HF config string
     ("electricity_H_long") and return the raw config string.
 
-    Looks up *name* in DEFAULT_CONFIG["CONFIGS"]; if it's not a key there,
-    assumes it's already a raw config string and returns it as‑is.
+    Looks up name in DEFAULT_CONFIG["CONFIGS"]; if not found, assumes
+    it is already a raw config string and returns it as-is.
     """
     configs = DEFAULT_CONFIG.get("CONFIGS", {})
     if name in configs:
         return configs[name]
-    # Also check the reverse (value already passed) — just pass through
     return name
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 # FAST DATASET ACCESS
-# ═══════════════════════════════════════════════════════════════
+# ===================================================================
 
 @functools.lru_cache(maxsize=16)
 def load_gift_dataset(
@@ -108,14 +107,14 @@ def load_gift_dataset(
     dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
 ) -> Any:
     """
-    Load a GiftEvalParquet config from HuggingFace (result is cached in‑process).
+    Load a GiftEvalParquet config from HuggingFace (result is cached in-process).
 
     Parameters
     ----------
     config : str
-        Dataset configuration name (e.g. "electricity_H_long").
+        Dataset configuration name or friendly name.
     n_samples : int or None
-        Limit the number of rows loaded. None → full split.
+        Limit the number of rows loaded. None -> full split.
     dataset_name : str
         HuggingFace dataset identifier.
 
@@ -137,9 +136,8 @@ def quick_peek(
     """
     Grab a single sample and return its history / future arrays.
 
-    Only loads the one row you ask for — no bulk download.
-
-    *config* can be a friendly name ("Energy") or a raw HF config string.
+    Only loads the one row you ask for - no bulk download.
+    config can be a friendly name ("Energy") or a raw HF config string.
 
     Returns a dict with keys:
         history, future, (and if normalize=True: history_n, future_n, mu, sigma)
@@ -161,10 +159,10 @@ def dataset_summary(
     max_display: int = 20,
 ) -> list[dict[str, Any]]:
     """
-    Return quick stats for the first *max_display* samples:
+    Return quick stats for the first max_display samples:
     history_len, future_len, history_mean/std, future_mean/std, n_nans.
 
-    *config* can be a friendly name ("Energy") or a raw HF config string.
+    config can be a friendly name ("Energy") or a raw HF config string.
     """
     config = resolve_config(config)
     ds = load_gift_dataset(config, n_samples)
@@ -195,19 +193,19 @@ def build_examples(
     dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
 ) -> list[dict[str, Any]]:
     """
-    Full pipeline: load → clean → align lengths → normalise.
+    Full pipeline: load -> clean -> align lengths -> normalise.
 
-    Only fetches the slice ``train[start:stop]`` from HuggingFace, then
-    applies *step* to subsample within that range.
+    Only fetches the slice train[start:stop] from HuggingFace, then
+    applies step to subsample within that range.
 
     Parameters
     ----------
     config : str
-        Dataset configuration name.
+        Dataset configuration name or friendly name.
     start, stop : int
-        Row range to load (HF split slicing). *stop* defaults to start + 1000.
+        Row range to load (HF split slicing). stop defaults to start + 1000.
     step : int
-        Keep every *step*‑th row inside the loaded range (1 = keep all).
+        Keep every step-th row inside the loaded range (1 = keep all).
     dataset_name : str
         HuggingFace dataset identifier.
 
