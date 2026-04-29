@@ -111,17 +111,19 @@ def load_gift_dataset(
 def quick_peek(
     index: int = 0,
     config: str = "electricity_H_long",
-    n_samples: int = 500,
     normalize: bool = False,
+    dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
 ) -> dict[str, np.ndarray | float]:
     """
     Grab a single sample and return its history / future arrays.
 
+    Only loads the one row you ask for — no bulk download.
+
     Returns a dict with keys:
         history, future, (and if normalize=True: history_n, future_n, mu, sigma)
     """
-    ds = load_gift_dataset(config, n_samples)
-    sample = ds[index]
+    ds = load_dataset(dataset_name, config, split=f"train[{index}:{index + 1}]")
+    sample = ds[0]
     history, future = extract_history_future(sample)
     result: dict[str, Any] = {"history": history, "future": future}
     if normalize:
