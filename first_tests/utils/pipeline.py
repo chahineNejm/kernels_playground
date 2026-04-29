@@ -8,7 +8,7 @@ End-to-end training & evaluation pipeline.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -84,37 +84,38 @@ class TrainEvalResult:
 # ===================================================================
 
 def train_eval(
-    config: str,
+    examples: list[dict],
     *,
-    domain: str | None = None,
-    start: int = 0,
-    stop: int | None = None,
-    step: int = 5,
+    train_indices: np.ndarray | Sequence[int] | None = None,
+    test_indices: np.ndarray | Sequence[int] | None = None,
     n_test: int = DEFAULT_CONFIG["N_TEST_SAMPLES"],
+    domain: str = "",
     gamma: float = DEFAULT_CONFIG["GAMMA"],
     seed: int = DEFAULT_CONFIG["RANDOM_SEED"],
-    dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
     verbose: bool = True,
 ) -> TrainEvalResult:
     """
-    Full pipeline for one dataset config.
+    Full pipeline: split -> fit -> predict -> metrics.
 
     Parameters
     ----------
-    config : str
-        Friendly name ("Energy") or raw HF config string.
-    domain : str, optional
-        Label used in prints / plots. Defaults to config.
-    start, stop, step : int
-        Passed straight to build_examples.
+    examples : list[dict]
+        Output of build_examples (or any subset of it).
+    train_indices, test_indices : array-like, optional
+        Explicit indices into *examples*.  Three modes:
+
+        1. Both provided  -> use exactly those.
+        2. Only test_indices -> train = everything else.
+        3. Only train_indices -> test = everything else.
+        4. Neither         -> random split using n_test & seed.
     n_test : int
-        Number of held-out test samples.
+        Only used when no explicit indices are given.
+    domain : str
+        Label for prints / plots.
     gamma : float
         Tikhonov regularisation for the kernel solve.
     seed : int
-        Random seed (used for the train/test permutation).
-    dataset_name : str
-        HuggingFace dataset identifier.
+        Random seed (only used for the auto-split fallback).
     verbose : bool
         Print progress lines.
 
@@ -122,40 +123,38 @@ def train_eval(
     -------
     TrainEvalResult
     """
-    raw_config = resolve_config(config)
-    domain = domain or config
+    n = len(examples)
 
-    # -- load --------------------------------------------------
-    if verbose:
-        print(f"[{domain}] loading {raw_config}  (rows {start}-{stop}, step {step})")
-
-    examples = build_examples(
-        config=raw_config,
-        start=start,
-        stop=stop,
-        step=step,
-        dataset_name=dataset_name,
-    )
-    if len(examples) <= n_test:
-        raise ValueError(
-            f"Not enough samples for {domain}: got {len(examples)}, need > {n_test}"
+    # -- resolve split -----------------------------------------
+    if train_indices is not None and test_indices is not None:
+        train_idx = np.asarray(train_indices, dtype=int)
+        test_idx = np.asarray(test_indices, dtype=int)
+    elif test_indices is not None:
+        test_idx = np.asarray(test_indices, dtype=int)
+        test_set = set(test_idx.tolist())
+        train_idx = np.array([i for i in range(n) if i not in test_set], dtype=int)
+    elif train_indices is not None:
+        train_idx = np.asarray(train_indices, dtype=int)
+        train_set = set(train_idx.tolist())
+        test_idx = np.array([i for i in range(n) if i not in train_set], dtype=int)
+    else:
+        if n <= n_test:
+            raise ValueError(f"Not enough examples ({n}) for n_test={n_test}")
+        rng = np.random.default_rng(seed)
+        perm = rng.permutation(n)
+        test_idx = np.sort(perm[:n_test])
+        train_idx = np.array(
+            [i for i in range(n) if i not in set(test_idx.tolist())], dtype=int
         )
 
-    # -- split -------------------------------------------------
-    rng = np.random.default_rng(seed)
-    perm = rng.permutation(len(examples))
-    test_indices = np.sort(perm[:n_test])
-    train_indices = np.array(
-        [i for i in range(len(examples)) if i not in set(test_indices.tolist())]
-    )
-
-    train_records = [examples[i] for i in train_indices]
-    test_records = [examples[i] for i in test_indices]
+    train_records = [examples[i] for i in train_idx]
+    test_records = [examples[i] for i in test_idx]
 
     if verbose:
         print(f"[{domain}] split: {len(train_records)} train, {len(test_records)} test")
 
     # -- fit ---------------------------------------------------
+    rng = np.random.default_rng(seed)
     x_train = np.stack([r["history_n"] for r in train_records])
     y_train = np.stack([r["future_n"] for r in train_records])
 
@@ -179,12 +178,12 @@ def train_eval(
 
     result = TrainEvalResult(
         domain=domain,
-        config=raw_config,
+        config="",
         model=model,
         train_records=train_records,
         test_records=test_records,
-        train_indices=train_indices,
-        test_indices=test_indices,
+        train_indices=train_idx,
+        test_indices=test_idx,
         predictions=predictions,
         examples=examples,
     )
@@ -204,7 +203,9 @@ def run_all_domains(
     *,
     start: int = 0,
     stop: int | None = None,
-    step: int = 5,
+    step: int = 1,
+    train_indices: np.ndarray | Sequence[int] | None = None,
+    test_indices: np.ndarray | Sequence[int] | None = None,
     n_test: int = DEFAULT_CONFIG["N_TEST_SAMPLES"],
     gamma: float = DEFAULT_CONFIG["GAMMA"],
     seed: int = DEFAULT_CONFIG["RANDOM_SEED"],
@@ -219,6 +220,11 @@ def run_all_domains(
     configs : dict
         {"Energy": "electricity_H_long", ...}.
         Defaults to DEFAULT_CONFIG["CONFIGS"].
+    start, stop, step : int
+        Passed to build_examples for each domain.
+    train_indices, test_indices : array-like, optional
+        Explicit indices (applied identically to every domain).
+        See train_eval for the split modes.
 
     Returns
     -------
@@ -232,18 +238,25 @@ def run_all_domains(
         if verbose:
             print(f"\n{'=' * 60}")
         try:
-            results[domain] = train_eval(
+            examples = build_examples(
                 config=config,
-                domain=domain,
                 start=start,
                 stop=stop,
                 step=step,
+                dataset_name=dataset_name,
+            )
+            result = train_eval(
+                examples,
+                domain=domain,
+                train_indices=train_indices,
+                test_indices=test_indices,
                 n_test=n_test,
                 gamma=gamma,
                 seed=seed,
-                dataset_name=dataset_name,
                 verbose=verbose,
             )
+            result.config = resolve_config(config)
+            results[domain] = result
         except ValueError as exc:
             if verbose:
                 print(f"[{domain}] skipped: {exc}")
