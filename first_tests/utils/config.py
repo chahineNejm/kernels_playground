@@ -11,9 +11,9 @@ DEFAULT_CONFIG = {
     "DATASET_NAME": "Salesforce/GiftEvalParquet",
     "CONFIGS": {
         "Energy": "electricity_H_long",
-        # "Cloud":   "bitbrains_fast_storage_5T_long",
-        # "Traffic": "loop_seattle_H_long",
-        # "Solar":   "solar_H_long",
+        "Cloud":   "bitbrains_fast_storage_5T_long",
+        "Traffic": "loop_seattle_H_long",
+        "Solar":   "solar_H_long",
     },
 
     # ── sampling ─────────────────────────────────────────────

@@ -79,6 +79,25 @@ def resample_series(x: np.ndarray, target_len: int) -> np.ndarray:
 
 
 # ═══════════════════════════════════════════════════════════════
+# CONFIG NAME RESOLUTION
+# ═══════════════════════════════════════════════════════════════
+
+def resolve_config(name: str) -> str:
+    """
+    Accept either a friendly name ("Energy") or a raw HF config string
+    ("electricity_H_long") and return the raw config string.
+
+    Looks up *name* in DEFAULT_CONFIG["CONFIGS"]; if it's not a key there,
+    assumes it's already a raw config string and returns it as‑is.
+    """
+    configs = DEFAULT_CONFIG.get("CONFIGS", {})
+    if name in configs:
+        return configs[name]
+    # Also check the reverse (value already passed) — just pass through
+    return name
+
+
+# ═══════════════════════════════════════════════════════════════
 # FAST DATASET ACCESS
 # ═══════════════════════════════════════════════════════════════
 
@@ -104,6 +123,7 @@ def load_gift_dataset(
     -------
     datasets.Dataset
     """
+    config = resolve_config(config)
     split = f"train[:{n_samples}]" if n_samples else "train"
     return load_dataset(dataset_name, config, split=split)
 
@@ -119,9 +139,12 @@ def quick_peek(
 
     Only loads the one row you ask for — no bulk download.
 
+    *config* can be a friendly name ("Energy") or a raw HF config string.
+
     Returns a dict with keys:
         history, future, (and if normalize=True: history_n, future_n, mu, sigma)
     """
+    config = resolve_config(config)
     ds = load_dataset(dataset_name, config, split=f"train[{index}:{index + 1}]")
     sample = ds[0]
     history, future = extract_history_future(sample)
@@ -140,7 +163,10 @@ def dataset_summary(
     """
     Return quick stats for the first *max_display* samples:
     history_len, future_len, history_mean/std, future_mean/std, n_nans.
+
+    *config* can be a friendly name ("Energy") or a raw HF config string.
     """
+    config = resolve_config(config)
     ds = load_gift_dataset(config, n_samples)
     rows: list[dict[str, Any]] = []
     for i in range(min(len(ds), max_display)):
@@ -190,6 +216,7 @@ def build_examples(
         history_model, future_model,
         history_n, future_n, mu, sigma
     """
+    config = resolve_config(config)
     if stop is None:
         stop = start + 1000
     split = f"train[{start}:{stop}]"
