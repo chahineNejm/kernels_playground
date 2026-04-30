@@ -70,7 +70,7 @@ def emd_decompose(
 # ═══════════════════════════════════════════════════════════════
 # KMD — Kernel Mode Decomposition
 # ═══════════════════════════════════════════════════════════════
-
+###### DISCLAIMER NEEDS  alot more cleaning this is ai slop for now
 def kmd_decompose(
     signal: np.ndarray,
     alpha: float = 25.0,
@@ -280,12 +280,169 @@ def kmd_decompose(
 
 
 # ═══════════════════════════════════════════════════════════════
+# CWT — Continuous Wavelet Transform
+# ═══════════════════════════════════════════════════════════════
+
+def _morlet_wavelet(t: np.ndarray, w0: float = 5.0) -> np.ndarray:
+    """Morlet wavelet:  exp(i*w0*t) * exp(-t^2/2)"""
+    return np.exp(1j * w0 * t) * np.exp(-t ** 2 / 2.0) * np.pi ** (-0.25)
+
+
+def _ricker_wavelet(t: np.ndarray) -> np.ndarray:
+    """Ricker / Mexican hat wavelet:  (1 - t^2) * exp(-t^2/2)"""
+    return (1.0 - t ** 2) * np.exp(-t ** 2 / 2.0) * 2.0 / (np.sqrt(3.0) * np.pi ** 0.25)
+
+
+def cwt_decompose(
+    signal: np.ndarray,
+    wavelet: str = "morlet",
+    scales: np.ndarray | None = None,
+    n_scales: int = 32,
+    scale_min: float = 1.0,
+    scale_max: float | None = None,
+    scale_spacing: str = "log",
+    top_k: int | None = None,
+    quiet: bool = True,
+) -> dict[str, np.ndarray]:
+    """
+    Decompose a 1-D signal via Continuous Wavelet Transform.
+
+    Computes CWT coefficients at each scale, then reconstructs
+    approximate mode signals so the output is comparable to
+    EMD/KMD modes.
+
+    Parameters
+    ----------
+    signal : 1-D array
+    wavelet : str
+        Wavelet to use:
+            "morlet"   — Morlet (default, good for oscillatory signals)
+            "ricker"   — Ricker / Mexican hat
+        Or pass any name accepted by pywt.ContinuousWavelet if
+        PyWavelets is installed (falls back to scipy otherwise).
+    scales : 1-D array, optional
+        Explicit scale array.  Overrides n_scales / scale_min / scale_max.
+    n_scales : int
+        Number of scales to compute (default 32).
+    scale_min : float
+        Smallest scale (highest frequency).  Default 1.0.
+    scale_max : float, optional
+        Largest scale (lowest frequency).  Default = signal_len / 4.
+    scale_spacing : "log" or "linear"
+        How to space scales between scale_min and scale_max.
+    top_k : int, optional
+        Keep only the top_k scales by energy.  None = keep all.
+    quiet : bool
+        If True (default), show a tqdm progress bar.
+        If False, silent.
+
+    Returns
+    -------
+    dict with keys:
+        modes       : ndarray (n_scales, N)  — reconstructed mode at each scale
+        coeffs      : ndarray (n_scales, N)  — raw CWT coefficients
+        scales      : ndarray (n_scales,)    — the scales used
+        energies    : ndarray (n_scales,)    — energy at each scale
+        frequencies : ndarray (n_scales,)    — pseudo-frequencies (1/scale)
+    """
+    try:
+        from tqdm.auto import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    signal = np.asarray(signal, dtype=float).ravel()
+    N = len(signal)
+
+    # --- build scales -----------------------------------------
+    if scales is None:
+        if scale_max is None:
+            scale_max = N / 4.0
+        if scale_spacing == "log":
+            scales = np.geomspace(scale_min, scale_max, n_scales)
+        else:
+            scales = np.linspace(scale_min, scale_max, n_scales)
+    scales = np.asarray(scales, dtype=float)
+    n_scales = len(scales)
+
+    # --- resolve wavelet function -----------------------------
+    _scipy_wavelets = {
+        "morlet": _morlet_wavelet,
+        "ricker": _ricker_wavelet,
+    }
+
+    use_pywt = False
+    if wavelet in _scipy_wavelets:
+        wavelet_fn = _scipy_wavelets[wavelet]
+    else:
+        try:
+            import pywt
+            use_pywt = True
+        except ImportError:
+            raise ValueError(
+                f"Wavelet {wavelet!r} not in built-ins ({list(_scipy_wavelets)}). "
+                f"Install PyWavelets for more options:  pip install PyWavelets"
+            )
+
+    # --- compute CWT ------------------------------------------
+    coeffs = np.zeros((n_scales, N), dtype=complex if not use_pywt else float)
+
+    if use_pywt:
+        import pywt
+        coeffs, _ = pywt.cwt(signal, scales, wavelet)
+    else:
+        iterator = range(n_scales)
+        if quiet and _tqdm is not None:
+            iterator = _tqdm(iterator, desc="CWT", total=n_scales, leave=False)
+
+        for i in iterator:
+            s = scales[i]
+            width = int(min(10 * s, N))
+            t_wav = np.arange(-width, width + 1) / s
+            wav = wavelet_fn(t_wav)
+            wav = wav / np.sqrt(s)
+            coeffs[i] = np.convolve(signal, wav, mode="same")
+
+    # --- energies and pseudo-frequencies ----------------------
+    coeffs_real = np.real(coeffs)
+    energies = np.sum(coeffs_real ** 2, axis=1)
+    pseudo_freqs = 1.0 / scales
+
+    # --- select top_k by energy -------------------------------
+    if top_k is not None and top_k < n_scales:
+        idx = np.argsort(energies)[::-1][:top_k]
+        idx = np.sort(idx)  # keep scale order
+        coeffs_real = coeffs_real[idx]
+        coeffs = coeffs[idx]
+        scales = scales[idx]
+        energies = energies[idx]
+        pseudo_freqs = pseudo_freqs[idx]
+        n_scales = top_k
+
+    # --- reconstruct modes ------------------------------------
+    # Each mode ~ coefficients at that scale.
+    # Normalize so sum of modes approximates the original signal.
+    modes = coeffs_real.copy()
+    mode_sum = np.sum(modes, axis=0)
+    denom = np.where(np.abs(mode_sum) > 1e-12, mode_sum, 1.0)
+    rescale = signal / denom
+    modes = modes * rescale[None, :]
+
+    return {
+        "modes": modes,               # (n_scales, N)
+        "coeffs": coeffs_real,         # (n_scales, N)
+        "scales": scales,              # (n_scales,)
+        "energies": energies,          # (n_scales,)
+        "frequencies": pseudo_freqs,   # (n_scales,)
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
 # UNIFIED INTERFACE
 # ═══════════════════════════════════════════════════════════════
 
 def decompose_series(
     signal: np.ndarray,
-    method: Literal["emd", "kmd"] = "emd",
+    method: Literal["emd", "kmd", "cwt"] = "emd",
     **kwargs,
 ) -> np.ndarray:
     """
@@ -297,8 +454,8 @@ def decompose_series(
     Parameters
     ----------
     signal : 1-D array
-    method : "emd" or "kmd"
-    **kwargs : passed to emd_decompose or kmd_decompose
+    method : "emd", "kmd", or "cwt"
+    **kwargs : passed to emd_decompose, kmd_decompose, or cwt_decompose
 
     Returns
     -------
@@ -309,8 +466,11 @@ def decompose_series(
     elif method == "kmd":
         result = kmd_decompose(signal, **kwargs)
         return result["modes"]
+    elif method == "cwt":
+        result = cwt_decompose(signal, **kwargs)
+        return result["modes"]
     else:
-        raise ValueError(f"Unknown method {method!r} — use 'emd' or 'kmd'")
+        raise ValueError(f"Unknown method {method!r} — use 'emd', 'kmd', or 'cwt'")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -318,7 +478,7 @@ def decompose_series(
 # ═══════════════════════════════════════════════════════════════
 
 def make_decomposition_feature_fn(
-    method: Literal["emd", "kmd"] = "emd",
+    method: Literal["emd", "kmd", "cwt"] = "emd",
     max_modes: int | None = None,
     include_original: bool = True,
     target_len: int | None = None,

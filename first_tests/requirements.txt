@@ -6,6 +6,7 @@ tqdm
 zombie-imp
 # -- optional: decomposition ---------------------------------
 EMD-signal            # for emd_decompose
+PyWavelets            # for cwt_decompose (optional, scipy fallback works too)
 # KMD_lib: not on PyPI — clone manually:
 #   git clone https://github.com/kernel-enthusiasts/Kernel-Mode-Decomposition-1D
 
