@@ -200,17 +200,18 @@ def train_eval(
         ls_str = f"l={model['lengthscale']:.4f}" if model["lengthscale"] else ""
         print(f"[{domain}] fitted: {model['kernel']}  {ls_str}  gamma={gamma:.2e}")
 
-    # -- predict -----------------------------------------------
+    # -- predict (batched — one gram call, not one per sample) ---
+    x_items_test = [_get_x(r) for r in test_records]
+    try:
+        x_test = np.stack(x_items_test)
+    except ValueError:
+        x_test = x_items_test  # variable shapes → list for DTW etc.
+
+    y_pred_all_n = predict_kernel_operator(model, x_test)  # (n_test, future_len)
+
     predictions: list[dict[str, Any]] = []
-    for rec in test_records:
-        x_q = _get_x(rec)
-        # wrap single sample: array → (1, d), list-item → [item]
-        if isinstance(x_q, np.ndarray):
-            x_query = x_q[None, :]
-        else:
-            x_query = [x_q]
-        y_pred_n = predict_kernel_operator(model, x_query)[0]
-        y_pred = rec["mu"] + rec["sigma"] * y_pred_n
+    for i, rec in enumerate(test_records):
+        y_pred = rec["mu"] + rec["sigma"] * y_pred_all_n[i]
         predictions.append({
             "future_pred": y_pred,
             "future_true_model": rec["future_model"],

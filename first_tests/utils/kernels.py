@@ -175,15 +175,35 @@ def _dtw_distance_matrix(
     A: list[np.ndarray],
     B: list[np.ndarray],
     window: int | None = None,
+    desc: str = "DTW",
 ) -> np.ndarray:
-    """Pairwise DTW distance matrix between two lists of sequences."""
+    """
+    Pairwise DTW distance matrix between two lists of sequences.
+
+    Exploits symmetry when A is B (same object) — only computes the
+    upper triangle, cutting wall-clock time roughly in half for gram
+    matrices.
+    """
     n, m = len(A), len(B)
     D = np.zeros((n, m))
-    with tqdm(total=n * m, desc="Calculating DTW Matrix") as pbar:
-        for i in range(n):
-            for j in range(m):
-                D[i, j] = _dtw_cost(A[i], B[j], window=window)
-                pbar.update(1)  # Tick the progress bar forward by 1 calculation
+    symmetric = A is B
+
+    if symmetric:
+        total = n * (n - 1) // 2
+        with tqdm(total=total, desc=f"{desc} (sym {n}x{n})") as pbar:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    d = _dtw_cost(A[i], A[j], window=window)
+                    D[i, j] = d
+                    D[j, i] = d
+                    pbar.update(1)
+    else:
+        total = n * m
+        with tqdm(total=total, desc=f"{desc} ({n}x{m})") as pbar:
+            for i in range(n):
+                for j in range(m):
+                    D[i, j] = _dtw_cost(A[i], B[j], window=window)
+                    pbar.update(1)
     return D
 
 
@@ -219,21 +239,42 @@ class DTWKernel(Kernel):
     def __init__(self, sigma: float | None = None, window: int | None = None):
         self.sigma = sigma
         self.window = window
+        self._cached_D = None       # cached distance matrix
+        self._cached_key = None     # (id(A), id(B)) it belongs to
 
     def estimate_params(self, X, rng):
         if self.sigma is None:
             n = min(24, len(X))
-            idx = rng.choice(len(X), size=n, replace=False)
-            sub = [X[i] for i in idx]
-            D = _dtw_distance_matrix(sub, sub, window=self.window)
+            if n >= len(X):
+                # subset IS the full training set — compute & cache
+                sub = X
+            else:
+                idx = rng.choice(len(X), size=n, replace=False)
+                sub = [X[i] for i in idx]
+
+            D = _dtw_distance_matrix(sub, sub, window=self.window,
+                                     desc="DTW sigma estimation")
             dists = D[np.triu_indices(n, k=1)]
             dists = dists[dists > 0]
             self.sigma = float(np.median(dists)) if dists.size else 1.0
 
+            # cache only if we used the full set (same object)
+            if sub is X:
+                self._cached_D = D
+                self._cached_key = (id(X), id(X))
+
     def gram(self, A, B) -> np.ndarray:
         if self.sigma is None:
             raise ValueError("sigma not set — call estimate_params or pass it to __init__")
-        D = _dtw_distance_matrix(A, B, window=self.window)
+
+        key = (id(A), id(B))
+        if self._cached_key == key and self._cached_D is not None:
+            D = self._cached_D
+            self._cached_D = None       # use once, then discard
+            self._cached_key = None
+        else:
+            D = _dtw_distance_matrix(A, B, window=self.window,
+                                     desc="DTW gram")
         return np.exp(-D ** 2 / (2.0 * self.sigma ** 2))
 
 
