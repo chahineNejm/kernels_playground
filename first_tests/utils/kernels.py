@@ -17,7 +17,7 @@ Metrics:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-
+from tqdm.auto import tqdm
 import numpy as np
 
 
@@ -179,9 +179,11 @@ def _dtw_distance_matrix(
     """Pairwise DTW distance matrix between two lists of sequences."""
     n, m = len(A), len(B)
     D = np.zeros((n, m))
-    for i in range(n):
-        for j in range(m):
-            D[i, j] = _dtw_cost(A[i], B[j], window=window)
+    with tqdm(total=n * m, desc="Calculating DTW Matrix") as pbar:
+        for i in range(n):
+            for j in range(m):
+                D[i, j] = _dtw_cost(A[i], B[j], window=window)
+                pbar.update(1)  # Tick the progress bar forward by 1 calculation
     return D
 
 
