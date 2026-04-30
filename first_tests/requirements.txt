@@ -1,1 +1,11 @@
+numpy
+scipy
+matplotlib
+datasets
+tqdm
 zombie-imp
+# -- optional: decomposition ---------------------------------
+EMD-signal            # for emd_decompose
+# KMD_lib: not on PyPI — clone manually:
+#   git clone https://github.com/kernel-enthusiasts/Kernel-Mode-Decomposition-1D
+
