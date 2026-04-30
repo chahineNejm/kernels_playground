@@ -111,13 +111,16 @@ def kmd_decompose(
         wp          : waveform parameters object
     """
     try:
+        import matplotlib
+        matplotlib.use("Agg")       # headless-safe, before KMD_lib pulls TkAgg
         import KMD_lib
-    except ImportError:
+    except ImportError as exc:
         raise ImportError(
-            "KMD_lib not found.  Clone the repo and add it to sys.path:\n"
+            "KMD_lib not found or failed to load.  Clone the repo and add it to sys.path:\n"
             "  git clone https://github.com/kernel-enthusiasts/Kernel-Mode-Decomposition-1D\n"
-            "  import sys; sys.path.insert(0, '/path/to/Kernel-Mode-Decomposition-1D')"
-        )
+            "  import sys; sys.path.insert(0, '/path/to/Kernel-Mode-Decomposition-1D')\n"
+            f"Original error: {exc}"
+        ) from exc
 
     signal = np.asarray(signal, dtype=float).ravel()
     N = len(signal)
