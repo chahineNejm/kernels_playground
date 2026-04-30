@@ -21,6 +21,8 @@ import builtins
 import contextlib
 import io
 import os
+import re
+import sys
 from typing import Any, Literal
 
 import numpy as np
@@ -106,8 +108,11 @@ def kmd_decompose(
         Refine to machine precision (slow, only for clean signals).
     t_mesh : 1-D array, optional
         Evenly spaced time mesh.  Auto-generated if None.
-    quiet : bool
-        Suppress KMD_lib's internal print spam (default True).
+    quiet : bool or "full"
+        True  (default) — suppress progress % spam, but print energy
+              and mode summary lines so you can see what was found.
+        "full" — suppress all stdout (for batch / pipeline use).
+        False — show everything KMD_lib prints (very verbose).
 
     Returns
     -------
@@ -140,21 +145,116 @@ def kmd_decompose(
         t_mesh = np.linspace(-1, 1, N)
 
     # --- run KMD non-interactively ----------------------------
-    # KMD_lib uses input() to ask for mode groupings and print()
-    # for verbose progress.  We patch both so it never blocks.
+    # KMD_lib.semimanual_maxpool_peel2 uses input() to ask the user
+    # to group detected mode fragments.  The prompt cycle is:
+    #   "Input mode segments to add to mode 0 ..." → give fragment index
+    #   same prompt again for mode 0              → "Next" or "Done"
+    # We auto-assign: fragment 0→mode 0, fragment 1→mode 1, etc.
     _original_input = builtins.input
+    _step = [0]  # 0 = give fragment index, 1 = finalize mode
 
     def _auto_input(prompt=""):
-        """Auto-respond 'Done' to grouping prompts."""
+        prompt_str = prompt if prompt else ""
+
+        # "keep for next iteration" → nothing to keep
+        if "keep for next iteration" in prompt_str.lower():
+            _step[0] = 0
+            return "Done"
+
+        # "Input mode segments to add to mode M ..."
+        m = re.search(r"to mode (\d+)", prompt_str)
+        if m:
+            mode_num = int(m.group(1))
+            if _step[0] == 0:
+                _step[0] = 1
+                return str(mode_num)   # assign fragment mode_num to this mode
+            else:
+                _step[0] = 0
+                return "Done"          # finalize this mode
+        # fallback
         return "Done"
+
+    # --- tqdm-based progress capture ----------------------------
+    # KMD_lib prints lines like "5% 64 time.struct_time(...)" and
+    # "Energy computation progress:".  We intercept stdout line by
+    # line: progress % lines drive a tqdm bar, summary lines are
+    # printed through, and everything else is swallowed.
+
+    try:
+        from tqdm.auto import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    class _KMDStdoutFilter(io.TextIOBase):
+        """Intercept KMD_lib stdout, show tqdm bar + summaries only."""
+        def __init__(self, show_summary=True):
+            self._bar = None
+            self._show_summary = show_summary
+            self._real_stdout = sys.stdout
+
+        def write(self, s):
+            for line in s.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                # progress line: "5% 64 time.struct_time(...)"
+                if "time.struct_time" in line or (
+                    stripped and stripped[0].isdigit() and "%" in stripped
+                ):
+                    pct_match = re.match(r"(\d+)%", stripped)
+                    if pct_match:
+                        pct = int(pct_match.group(1))
+                        if self._bar is None and _tqdm is not None:
+                            self._bar = _tqdm(
+                                total=100, desc="KMD energy",
+                                file=self._real_stdout, leave=False,
+                            )
+                        if self._bar is not None:
+                            self._bar.n = pct
+                            self._bar.refresh()
+                    continue
+
+                # "Energy computation progress:" header — start new bar
+                if "energy computation" in stripped.lower():
+                    self._close_bar()
+                    continue
+
+                # everything else: print if showing summaries
+                if self._show_summary:
+                    self._real_stdout.write(line + "\n")
+                    self._real_stdout.flush()
+
+            return len(s)
+
+        def flush(self):
+            if self._real_stdout:
+                self._real_stdout.flush()
+
+        def close_bar(self):
+            self._close_bar()
+
+        def _close_bar(self):
+            if self._bar is not None:
+                self._bar.n = 100
+                self._bar.refresh()
+                self._bar.close()
+                self._bar = None
 
     builtins.input = _auto_input
     try:
-        if quiet:
+        if quiet == "full":
             with contextlib.redirect_stdout(io.StringIO()):
                 fmodes, wp = KMD_lib.semimanual_maxpool_peel2(
                     signal, wave_p, alpha, t_mesh, thr, thr_en, ref_fin,
                 )
+        elif quiet:
+            filt = _KMDStdoutFilter(show_summary=True)
+            with contextlib.redirect_stdout(filt):
+                fmodes, wp = KMD_lib.semimanual_maxpool_peel2(
+                    signal, wave_p, alpha, t_mesh, thr, thr_en, ref_fin,
+                )
+            filt.close_bar()
         else:
             fmodes, wp = KMD_lib.semimanual_maxpool_peel2(
                 signal, wave_p, alpha, t_mesh, thr, thr_en, ref_fin,
