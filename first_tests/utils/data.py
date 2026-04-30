@@ -1,14 +1,15 @@
 """
 Data loading, cleaning, and quick-access helpers for GiftEvalParquet.
 
-Core helpers (from the original notebook):
+Core helpers:
     clean_series, extract_history_future, normalize_by_history, resample_series
 
-Fast dataset access:
-    load_gift_dataset   - cached HuggingFace loader (returns a datasets.Dataset)
-    quick_peek          - grab a single sample's history/future arrays
-    dataset_summary     - length / NaN / range stats for the first N samples
-    build_examples      - full pipeline: load -> clean -> normalise -> split
+Dataset access:
+    load_gift_dataset   - cached HuggingFace loader
+    quick_peek          - grab a single sample
+    dataset_summary     - stats for the first N samples
+    build_examples      - load + clean only (raw lengths preserved)
+    prepare_examples    - resample to target lengths + normalize (call before training)
 """
 
 from __future__ import annotations
@@ -61,7 +62,9 @@ def normalize_by_history(
     sigma = float(np.std(history))
     if sigma < 1e-8:
         sigma = 1.0
-    return (history - mu) / sigma, (future - mu) / sigma, mu, sigma
+    history_n = (history - mu) / sigma
+    future_n = (future - mu) / sigma
+    return history_n, future_n, mu, sigma
 
 
 def resample_series(x: np.ndarray, target_len: int) -> np.ndarray:
@@ -73,9 +76,9 @@ def resample_series(x: np.ndarray, target_len: int) -> np.ndarray:
         return x.copy()
     if x.size == 1:
         return np.full(target_len, x[0], dtype=float)
-    src = np.linspace(0.0, 1.0, x.size)
-    dst = np.linspace(0.0, 1.0, target_len)
-    return np.interp(dst, src, x)
+    src_grid = np.linspace(0.0, 1.0, x.size)
+    dst_grid = np.linspace(0.0, 1.0, target_len)
+    return np.interp(dst_grid, src_grid, x)
 
 
 # ===================================================================
@@ -86,9 +89,6 @@ def resolve_config(name: str) -> str:
     """
     Accept either a friendly name ("Energy") or a raw HF config string
     ("electricity_H_long") and return the raw config string.
-
-    Looks up name in DEFAULT_CONFIG["CONFIGS"]; if not found, assumes
-    it is already a raw config string and returns it as-is.
     """
     configs = DEFAULT_CONFIG.get("CONFIGS", {})
     if name in configs:
@@ -108,19 +108,6 @@ def load_gift_dataset(
 ) -> Any:
     """
     Load a GiftEvalParquet config from HuggingFace (result is cached in-process).
-
-    Parameters
-    ----------
-    config : str
-        Dataset configuration name or friendly name.
-    n_samples : int or None
-        Limit the number of rows loaded. None -> full split.
-    dataset_name : str
-        HuggingFace dataset identifier.
-
-    Returns
-    -------
-    datasets.Dataset
     """
     config = resolve_config(config)
     split = f"train[:{n_samples}]" if n_samples else "train"
@@ -134,13 +121,8 @@ def quick_peek(
     dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
 ) -> dict[str, np.ndarray | float]:
     """
-    Grab a single sample and return its history / future arrays.
-
-    Only loads the one row you ask for - no bulk download.
-    config can be a friendly name ("Energy") or a raw HF config string.
-
-    Returns a dict with keys:
-        history, future, (and if normalize=True: history_n, future_n, mu, sigma)
+    Grab a single sample. Only loads one row.
+    config can be a friendly name or raw HF config string.
     """
     config = resolve_config(config)
     ds = load_dataset(dataset_name, config, split=f"train[{index}:{index + 1}]")
@@ -159,10 +141,7 @@ def dataset_summary(
     max_display: int = 20,
 ) -> list[dict[str, Any]]:
     """
-    Return quick stats for the first max_display samples:
-    history_len, future_len, history_mean/std, future_mean/std, n_nans.
-
-    config can be a friendly name ("Energy") or a raw HF config string.
+    Quick stats for the first max_display samples.
     """
     config = resolve_config(config)
     ds = load_gift_dataset(config, n_samples)
@@ -185,6 +164,10 @@ def dataset_summary(
     return rows
 
 
+# ===================================================================
+# LOAD + CLEAN (no normalization, no resampling)
+# ===================================================================
+
 def build_examples(
     config: str = "electricity_H_long",
     start: int = 0,
@@ -193,26 +176,21 @@ def build_examples(
     dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
 ) -> list[dict[str, Any]]:
     """
-    Full pipeline: load -> clean -> align lengths -> normalise.
+    Load and clean samples. No resampling, no normalization.
 
-    Only fetches the slice train[start:stop] from HuggingFace, then
-    applies step to subsample within that range.
+    Each sample keeps its original lengths. Returns a list of dicts:
+        sample_idx  - global row index in the HF dataset
+        history     - cleaned 1-D array (original length)
+        future      - cleaned 1-D array (original length)
 
     Parameters
     ----------
     config : str
-        Dataset configuration name or friendly name.
+        Friendly name ("Energy") or raw HF config string.
     start, stop : int
-        Row range to load (HF split slicing). stop defaults to start + 1000.
+        Row range to load. stop defaults to start + 1000.
     step : int
-        Keep every step-th row inside the loaded range (1 = keep all).
-    dataset_name : str
-        HuggingFace dataset identifier.
-
-    Returns a list of dicts, each containing:
-        sample_idx, history, future,
-        history_model, future_model,
-        history_n, future_n, mu, sigma
+        Keep every step-th row (1 = keep all).
     """
     config = resolve_config(config)
     if stop is None:
@@ -223,27 +201,82 @@ def build_examples(
     indices = range(0, len(ds), step)
     ds = ds.select(indices)
 
-    raw: list[dict[str, Any]] = []
+    examples: list[dict[str, Any]] = []
     for local_idx, sample in enumerate(ds):
         h, f = extract_history_future(sample)
         if len(h) == 0 or len(f) == 0:
             continue
-        # sample_idx is the global index in the dataset
         global_idx = start + indices[local_idx]
-        raw.append({"sample_idx": global_idx, "history": h, "future": f})
+        examples.append({
+            "sample_idx": global_idx,
+            "history": h,
+            "future": f,
+        })
+    return examples
 
-    if not raw:
+
+# ===================================================================
+# RESAMPLE + NORMALIZE (call before training)
+# ===================================================================
+
+def prepare_examples(
+    examples: list[dict[str, Any]],
+    *,
+    history_len: int | None = None,
+    future_len: int | None = None,
+    min_history: int | None = None,
+    min_future: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Resample to uniform lengths and Z-normalize. Call this on a subset
+    of build_examples output right before training.
+
+    Parameters
+    ----------
+    examples : list[dict]
+        Output of build_examples. Each dict must have 'history' and 'future'.
+    history_len : int, optional
+        Target history length. If None, uses the median across examples.
+    future_len : int, optional
+        Target future length. If None, uses the median across examples.
+    min_history : int, optional
+        Drop any sample with history shorter than this (before resampling).
+    min_future : int, optional
+        Drop any sample with future shorter than this (before resampling).
+
+    Returns
+    -------
+    list[dict] with keys:
+        sample_idx, history, future,
+        history_model, future_model,
+        history_n, future_n, mu, sigma
+    """
+    # -- filter by minimum lengths -----------------------------
+    filtered = examples
+    if min_history is not None:
+        filtered = [e for e in filtered if len(e["history"]) >= min_history]
+    if min_future is not None:
+        filtered = [e for e in filtered if len(e["future"]) >= min_future]
+
+    if not filtered:
         return []
 
-    history_len = min(len(r["history"]) for r in raw)
-    future_len = min(len(r["future"]) for r in raw)
+    # -- resolve target lengths --------------------------------
+    h_lengths = [len(e["history"]) for e in filtered]
+    f_lengths = [len(e["future"]) for e in filtered]
 
-    examples: list[dict[str, Any]] = []
-    for rec in raw:
+    if history_len is None:
+        history_len = int(np.median(h_lengths))
+    if future_len is None:
+        future_len = int(np.median(f_lengths))
+
+    # -- resample + normalize ----------------------------------
+    prepared: list[dict[str, Any]] = []
+    for rec in filtered:
         hm = resample_series(rec["history"], history_len)
         fm = resample_series(rec["future"], future_len)
         hn, fn, mu, sigma = normalize_by_history(hm, fm)
-        examples.append({
+        prepared.append({
             "sample_idx": rec["sample_idx"],
             "history": rec["history"],
             "future": rec["future"],
@@ -254,4 +287,4 @@ def build_examples(
             "mu": mu,
             "sigma": sigma,
         })
-    return examples
+    return prepared
