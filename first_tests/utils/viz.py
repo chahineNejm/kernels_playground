@@ -318,8 +318,8 @@ def plot_predictions_for_domain(
         ax.axvline(0, color="tab:blue", ls=":", lw=1.2)
         ax.set_title(
             f"{domain} | sample {record['sample_idx']} "
-            f"| RMSE={pred['rmse']:.4f} | relRMSE={pred['relative_rmse']:.4f} "
-            f"| l={pred['lengthscale']:.4f}"
+            f"| RMSE={pred['rmse']:.4f} | relRMSE={pred['relative_rmse']:.4f}"
+            + (f" | l={pred['lengthscale']:.4f}" if pred.get('lengthscale') is not None else "")
         )
         ax.set_xlabel("time index relative to T1")
         ax.set_ylabel("value")
@@ -379,7 +379,8 @@ def report_eval(
     print(f"{'=' * 50}")
     print(f"  {domain}")
     print(f"  train: {s['n_train']}   test: {s['n_test']}")
-    print(f"  lengthscale: {s['lengthscale']:.4f}   gamma: {s['gamma']:.2e}")
+    ls_str = f"{s['lengthscale']:.4f}" if s.get('lengthscale') is not None else "n/a"
+    print(f"  kernel: {s.get('kernel', 'RBF')}   lengthscale: {ls_str}   gamma: {s['gamma']:.2e}")
     print(f"  mean RMSE:     {s['mean_rmse']:.4f}")
     print(f"  mean relRMSE:  {s['mean_relRMSE']:.4f}")
     print(f"  median relRMSE:{s['median_relRMSE']:.4f}")
