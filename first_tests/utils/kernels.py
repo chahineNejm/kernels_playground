@@ -223,8 +223,9 @@ class DTWKernel(Kernel):
     Parameters
     ----------
     sigma : float, optional
-        Bandwidth.  If None, estimated from the median DTW distance
-        on a random subset of training data.
+        Bandwidth.  If None, estimated automatically from the median
+        of the training DTW distance matrix — no extra computation,
+        the matrix we need for the gram is the same one we use for sigma.
     window : int, optional
         Sakoe-Chiba band half-width.  Limits warping and speeds up
         computation from O(T^2) to O(T * window).  None = full DTW.
@@ -239,42 +240,33 @@ class DTWKernel(Kernel):
     def __init__(self, sigma: float | None = None, window: int | None = None):
         self.sigma = sigma
         self.window = window
-        self._cached_D = None       # cached distance matrix
-        self._cached_key = None     # (id(A), id(B)) it belongs to
+        self._sigma_from_user = sigma is not None
 
     def estimate_params(self, X, rng):
-        if self.sigma is None:
-            n = min(24, len(X))
-            if n >= len(X):
-                # subset IS the full training set — compute & cache
-                sub = X
-            else:
-                idx = rng.choice(len(X), size=n, replace=False)
-                sub = [X[i] for i in idx]
+        # sigma is estimated inside gram() from the actual distance matrix,
+        # so nothing to do here — kept for Kernel interface compatibility.
+        pass
 
-            D = _dtw_distance_matrix(sub, sub, window=self.window,
-                                     desc="DTW sigma estimation")
-            dists = D[np.triu_indices(n, k=1)]
-            dists = dists[dists > 0]
-            self.sigma = float(np.median(dists)) if dists.size else 1.0
-
-            # cache only if we used the full set (same object)
-            if sub is X:
-                self._cached_D = D
-                self._cached_key = (id(X), id(X))
+    def _estimate_sigma(self, D: np.ndarray) -> None:
+        """Set sigma from median of positive entries in a distance matrix."""
+        n = D.shape[0]
+        dists = D[np.triu_indices(n, k=1)]
+        dists = dists[dists > 0]
+        self.sigma = float(np.median(dists)) if dists.size else 1.0
 
     def gram(self, A, B) -> np.ndarray:
-        if self.sigma is None:
-            raise ValueError("sigma not set — call estimate_params or pass it to __init__")
+        D = _dtw_distance_matrix(A, B, window=self.window, desc="DTW gram")
 
-        key = (id(A), id(B))
-        if self._cached_key == key and self._cached_D is not None:
-            D = self._cached_D
-            self._cached_D = None       # use once, then discard
-            self._cached_key = None
-        else:
-            D = _dtw_distance_matrix(A, B, window=self.window,
-                                     desc="DTW gram")
+        # auto-estimate sigma from the training gram (A is B)
+        if not self._sigma_from_user and self.sigma is None and A is B:
+            self._estimate_sigma(D)
+
+        if self.sigma is None:
+            raise ValueError(
+                "sigma not set — pass sigma to __init__, or call gram "
+                "on the training set first (A is B) so it auto-estimates."
+            )
+
         return np.exp(-D ** 2 / (2.0 * self.sigma ** 2))
 
 
