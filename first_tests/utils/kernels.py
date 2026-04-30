@@ -1,19 +1,70 @@
 """
-Kernel operator regression utilities.
+Kernel operator regression utilities — pluggable kernel architecture.
 
-    squared_distance_matrix, rbf_kernel        – kernel primitives
-    median_heuristic_lengthscale               – automatic lengthscale
-    fit_kernel_operator, predict_kernel_operator – train / infer
-    rmse, relative_rmse                        – evaluation metrics
+Kernel classes (subclass Kernel to add your own):
+    RBFKernel            — squared-exponential / Gaussian
+    LinearKernel         — dot-product
+    DTWKernel            — dynamic time warping distance
+
+Fitting / prediction:
+    fit_kernel_operator   — train with any Kernel instance
+    predict_kernel_operator — infer
+
+Metrics:
+    rmse, relative_rmse
 """
 
 from __future__ import annotations
+
+from abc import ABC, abstractmethod
 
 import numpy as np
 
 
 # ═══════════════════════════════════════════════════════════════
-# KERNEL PRIMITIVES
+# BASE KERNEL
+# ═══════════════════════════════════════════════════════════════
+
+class Kernel(ABC):
+    """
+    Base class for all kernels.
+
+    Subclass contract
+    -----------------
+    gram(A, B) -> (n, m)   kernel / Gram matrix
+    estimate_params(X, rng) -> None   auto-tune hyperparameters (optional)
+
+    Input conventions
+    -----------------
+    "Flat" kernels (RBF, Linear):
+        A is (n_samples, n_features), B is (m_samples, n_features).
+
+    "Structured" kernels (DTW):
+        A and B are *lists* of arrays — each element is one sample,
+        shape (seq_len_i,) or (seq_len_i, n_channels).
+        Sequences may have different lengths.
+    """
+
+    @abstractmethod
+    def gram(self, A, B) -> np.ndarray:
+        ...
+
+    def estimate_params(self, X, rng: np.random.Generator):
+        """Auto-tune kernel parameters from training data. Override as needed."""
+
+    def __call__(self, A, B) -> np.ndarray:
+        return self.gram(A, B)
+
+    def __repr__(self):
+        params = ", ".join(
+            f"{k}={v!r}" for k, v in self.__dict__.items()
+            if not k.startswith("_")
+        )
+        return f"{type(self).__name__}({params})"
+
+
+# ═══════════════════════════════════════════════════════════════
+# DISTANCE HELPERS
 # ═══════════════════════════════════════════════════════════════
 
 def squared_distance_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -23,11 +74,6 @@ def squared_distance_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     a2 = np.sum(a ** 2, axis=1, keepdims=True)
     b2 = np.sum(b ** 2, axis=1, keepdims=True).T
     return np.maximum(a2 + b2 - 2.0 * a @ b.T, 0.0)
-
-
-def rbf_kernel(a: np.ndarray, b: np.ndarray, lengthscale: float) -> np.ndarray:
-    """RBF (squared‑exponential) kernel matrix."""
-    return np.exp(-squared_distance_matrix(a, b) / (2.0 * lengthscale ** 2))
 
 
 def median_heuristic_lengthscale(
@@ -48,35 +94,211 @@ def median_heuristic_lengthscale(
 
 
 # ═══════════════════════════════════════════════════════════════
+# RBF KERNEL
+# ═══════════════════════════════════════════════════════════════
+
+class RBFKernel(Kernel):
+    """
+    Squared-exponential / Gaussian / RBF kernel.
+
+        K(x, y) = exp( -||x - y||^2 / (2 * lengthscale^2) )
+
+    Input: 2-D arrays (n_samples, n_features).
+    If lengthscale is None, it is auto-estimated via median heuristic.
+    """
+
+    def __init__(self, lengthscale: float | None = None):
+        self.lengthscale = lengthscale
+
+    def estimate_params(self, X, rng):
+        if self.lengthscale is None:
+            self.lengthscale = median_heuristic_lengthscale(X, rng)
+
+    def gram(self, A, B) -> np.ndarray:
+        if self.lengthscale is None:
+            raise ValueError("lengthscale not set — call estimate_params or pass it to __init__")
+        return np.exp(-squared_distance_matrix(A, B) / (2.0 * self.lengthscale ** 2))
+
+
+# ═══════════════════════════════════════════════════════════════
+# LINEAR KERNEL
+# ═══════════════════════════════════════════════════════════════
+
+class LinearKernel(Kernel):
+    """
+    Dot-product kernel:  K(x, y) = x · y + bias
+
+    Input: 2-D arrays (n_samples, n_features).
+    No hyperparameters to tune (bias is fixed).
+    """
+
+    def __init__(self, bias: float = 0.0):
+        self.bias = bias
+
+    def gram(self, A, B) -> np.ndarray:
+        A = np.asarray(A, dtype=float)
+        B = np.asarray(B, dtype=float)
+        return A @ B.T + self.bias
+
+
+# ═══════════════════════════════════════════════════════════════
+# DTW HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+def _dtw_cost(x: np.ndarray, y: np.ndarray, window: int | None = None) -> float:
+    """
+    DTW distance between two sequences.
+
+    x, y : 1-D (T,) or 2-D (T, C) arrays.
+    window : Sakoe-Chiba band half-width (None = unconstrained).
+    """
+    if x.ndim == 1:
+        x = x[:, None]
+    if y.ndim == 1:
+        y = y[:, None]
+
+    n, m = x.shape[0], y.shape[0]
+    cost = np.full((n + 1, m + 1), np.inf)
+    cost[0, 0] = 0.0
+
+    for i in range(1, n + 1):
+        j_lo = max(1, i - window) if window is not None else 1
+        j_hi = min(m, i + window) if window is not None else m
+        for j in range(j_lo, j_hi + 1):
+            d = float(np.sum((x[i - 1] - y[j - 1]) ** 2))
+            cost[i, j] = d + min(cost[i - 1, j], cost[i, j - 1], cost[i - 1, j - 1])
+
+    return float(np.sqrt(cost[n, m]))
+
+
+def _dtw_distance_matrix(
+    A: list[np.ndarray],
+    B: list[np.ndarray],
+    window: int | None = None,
+) -> np.ndarray:
+    """Pairwise DTW distance matrix between two lists of sequences."""
+    n, m = len(A), len(B)
+    D = np.zeros((n, m))
+    for i in range(n):
+        for j in range(m):
+            D[i, j] = _dtw_cost(A[i], B[j], window=window)
+    return D
+
+
+# ═══════════════════════════════════════════════════════════════
+# DTW KERNEL
+# ═══════════════════════════════════════════════════════════════
+
+class DTWKernel(Kernel):
+    """
+    Kernel based on Dynamic Time Warping distance.
+
+        K(x, y) = exp( -dtw(x, y)^2 / (2 * sigma^2) )
+
+    Input: *list* of arrays, each (seq_len,) or (seq_len, n_channels).
+    Sequences may have different lengths — that is the whole point.
+
+    Parameters
+    ----------
+    sigma : float, optional
+        Bandwidth.  If None, estimated from the median DTW distance
+        on a random subset of training data.
+    window : int, optional
+        Sakoe-Chiba band half-width.  Limits warping and speeds up
+        computation from O(T^2) to O(T * window).  None = full DTW.
+
+    Note
+    ----
+    Complexity is O(n^2 * T^2) for n samples of length T.
+    Fine for a few hundred samples; for thousands, set *window* or
+    consider an approximate DTW library (dtaidistance, tslearn).
+    """
+
+    def __init__(self, sigma: float | None = None, window: int | None = None):
+        self.sigma = sigma
+        self.window = window
+
+    def estimate_params(self, X, rng):
+        if self.sigma is None:
+            n = min(24, len(X))
+            idx = rng.choice(len(X), size=n, replace=False)
+            sub = [X[i] for i in idx]
+            D = _dtw_distance_matrix(sub, sub, window=self.window)
+            dists = D[np.triu_indices(n, k=1)]
+            dists = dists[dists > 0]
+            self.sigma = float(np.median(dists)) if dists.size else 1.0
+
+    def gram(self, A, B) -> np.ndarray:
+        if self.sigma is None:
+            raise ValueError("sigma not set — call estimate_params or pass it to __init__")
+        D = _dtw_distance_matrix(A, B, window=self.window)
+        return np.exp(-D ** 2 / (2.0 * self.sigma ** 2))
+
+
+# ═══════════════════════════════════════════════════════════════
+# BACKWARD-COMPAT STANDALONE FUNCTION
+# ═══════════════════════════════════════════════════════════════
+
+def rbf_kernel(a: np.ndarray, b: np.ndarray, lengthscale: float) -> np.ndarray:
+    """RBF kernel matrix (standalone helper, kept for backward compat)."""
+    return np.exp(-squared_distance_matrix(a, b) / (2.0 * lengthscale ** 2))
+
+
+# ═══════════════════════════════════════════════════════════════
 # FIT / PREDICT
 # ═══════════════════════════════════════════════════════════════
 
 def fit_kernel_operator(
-    x_train: np.ndarray,
+    x_train,
     y_train: np.ndarray,
     gamma: float,
     rng: np.random.Generator,
+    kernel: Kernel | None = None,
 ) -> dict:
     """
-    Fit a kernel‑operator regressor:  y ≈ K(x, X_train) · α
+    Fit a kernel-operator regressor:  y ~ K(x, X_train) * alpha
 
-    Returns a model dict with keys:
-        x_train, alpha, lengthscale, gamma
+    Parameters
+    ----------
+    x_train
+        Training inputs.  Shape depends on the kernel:
+        - Flat kernels (RBF, Linear): 2-D array (n_samples, d)
+        - Structured kernels (DTW):   list of arrays
+    y_train : ndarray (n_samples, output_dim)
+        Training targets.
+    gamma : float
+        Tikhonov regularisation.
+    rng : Generator
+        For automatic hyperparameter estimation.
+    kernel : Kernel, optional
+        Any Kernel subclass instance.  Defaults to RBFKernel().
+
+    Returns
+    -------
+    dict with keys: x_train, alpha, kernel, gamma, lengthscale
     """
-    lengthscale = median_heuristic_lengthscale(x_train, rng=rng)
-    gram = rbf_kernel(x_train, x_train, lengthscale)
-    alpha = np.linalg.solve(gram + gamma * np.eye(gram.shape[0]), y_train)
+    if kernel is None:
+        kernel = RBFKernel()
+
+    kernel.estimate_params(x_train, rng)
+
+    G = kernel(x_train, x_train)
+    alpha = np.linalg.solve(G + gamma * np.eye(G.shape[0]), y_train)
+
     return {
         "x_train": x_train,
         "alpha": alpha,
-        "lengthscale": lengthscale,
+        "kernel": kernel,
         "gamma": gamma,
+        # backward compat — None for kernels that don't have it
+        "lengthscale": getattr(kernel, "lengthscale", None),
     }
 
 
-def predict_kernel_operator(model: dict, x_query: np.ndarray) -> np.ndarray:
-    """Predict using a fitted kernel‑operator model."""
-    k = rbf_kernel(x_query, model["x_train"], model["lengthscale"])
+def predict_kernel_operator(model: dict, x_query) -> np.ndarray:
+    """Predict using a fitted kernel-operator model."""
+    kernel = model["kernel"]
+    k = kernel(x_query, model["x_train"])
     return k @ model["alpha"]
 
 

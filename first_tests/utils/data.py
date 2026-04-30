@@ -174,6 +174,7 @@ def build_examples(
     stop: int | None = None,
     step: int = 1,
     dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
+    extra_keys: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Load and clean samples. No resampling, no normalization.
@@ -182,6 +183,7 @@ def build_examples(
         sample_idx  - global row index in the HF dataset
         history     - cleaned 1-D array (original length)
         future      - cleaned 1-D array (original length)
+        + any fields listed in extra_keys, pulled from the raw HF sample
 
     Parameters
     ----------
@@ -191,6 +193,10 @@ def build_examples(
         Row range to load. stop defaults to start + 1000.
     step : int
         Keep every step-th row (1 = keep all).
+    extra_keys : list[str], optional
+        Additional columns to extract from each HF sample dict
+        (e.g. ["item_id", "freq", "seasonal_period"]).
+        Values are stored as-is in each example dict.
     """
     config = resolve_config(config)
     if stop is None:
@@ -207,11 +213,17 @@ def build_examples(
         if len(h) == 0 or len(f) == 0:
             continue
         global_idx = start + indices[local_idx]
-        examples.append({
+        entry: dict[str, Any] = {
             "sample_idx": global_idx,
             "history": h,
             "future": f,
-        })
+        }
+        if extra_keys:
+            for key in extra_keys:
+                if key in sample:
+                    val = sample[key]
+                    entry[key] = np.asarray(val, dtype=float) if isinstance(val, list) else val
+        examples.append(entry)
     return examples
 
 
@@ -226,6 +238,7 @@ def prepare_examples(
     future_len: int | None = None,
     min_history: int | None = None,
     min_future: int | None = None,
+    feature_fn: Any | None = None,
 ) -> list[dict[str, Any]]:
     """
     Resample to uniform lengths and Z-normalize. Call this on a subset
@@ -243,13 +256,33 @@ def prepare_examples(
         Drop any sample with history shorter than this (before resampling).
     min_future : int, optional
         Drop any sample with future shorter than this (before resampling).
+    feature_fn : callable, optional
+        A function  f(example_dict) -> np.ndarray  that builds the kernel
+        input from each prepared example.  The dict it receives already has
+        history_n, future_n, mu, sigma, plus any extra_keys from build_examples.
+
+        If None, ``x_model`` defaults to ``history_n`` (1-D, same as before).
+
+        Examples::
+
+            # append summary stats to the history
+            def with_stats(rec):
+                h = rec["history_n"]
+                stats = [np.mean(h), np.std(h), np.min(h), np.max(h)]
+                return np.concatenate([h, stats])
+
+            # stack multiple channels into (seq_len, n_channels)
+            def multivariate(rec):
+                return np.column_stack([rec["history_n"], rec["temperature_n"]])
 
     Returns
     -------
     list[dict] with keys:
         sample_idx, history, future,
         history_model, future_model,
-        history_n, future_n, mu, sigma
+        history_n, future_n, mu, sigma,
+        x_model   (kernel input — built by feature_fn or = history_n)
+        + any extra keys carried forward from build_examples
     """
     # -- filter by minimum lengths -----------------------------
     filtered = examples
@@ -271,12 +304,14 @@ def prepare_examples(
         future_len = int(np.median(f_lengths))
 
     # -- resample + normalize ----------------------------------
+    _core_keys = {"sample_idx", "history", "future"}
     prepared: list[dict[str, Any]] = []
     for rec in filtered:
         hm = resample_series(rec["history"], history_len)
         fm = resample_series(rec["future"], future_len)
         hn, fn, mu, sigma = normalize_by_history(hm, fm)
-        prepared.append({
+
+        entry: dict[str, Any] = {
             "sample_idx": rec["sample_idx"],
             "history": rec["history"],
             "future": rec["future"],
@@ -286,5 +321,18 @@ def prepare_examples(
             "future_n": fn,
             "mu": mu,
             "sigma": sigma,
-        })
+        }
+
+        # carry forward any extra keys from build_examples
+        for k, v in rec.items():
+            if k not in entry and k not in _core_keys:
+                entry[k] = v
+
+        # build kernel input
+        if feature_fn is not None:
+            entry["x_model"] = feature_fn(entry)
+        else:
+            entry["x_model"] = hn
+
+        prepared.append(entry)
     return prepared
