@@ -17,6 +17,10 @@ KMD:  git clone https://github.com/kernel-enthusiasts/Kernel-Mode-Decomposition-
 
 from __future__ import annotations
 
+import builtins
+import contextlib
+import io
+import os
 from typing import Any, Literal
 
 import numpy as np
@@ -73,11 +77,14 @@ def kmd_decompose(
     thr_en: float = 0.1,
     ref_fin: bool = False,
     t_mesh: np.ndarray | None = None,
+    quiet: bool = True,
 ) -> dict[str, np.ndarray]:
     """
     Decompose a 1-D signal into modes via Kernel Mode Decomposition.
 
-    Wraps KMD_lib.semimanual_maxpool_peel2 (the non-interactive variant).
+    Wraps KMD_lib.semimanual_maxpool_peel2 in a fully non-interactive way:
+    stdout spam is suppressed and interactive grouping prompts are
+    auto-accepted ("Done") so it never blocks.
 
     Parameters
     ----------
@@ -99,6 +106,8 @@ def kmd_decompose(
         Refine to machine precision (slow, only for clean signals).
     t_mesh : 1-D array, optional
         Evenly spaced time mesh.  Auto-generated if None.
+    quiet : bool
+        Suppress KMD_lib's internal print spam (default True).
 
     Returns
     -------
@@ -112,7 +121,7 @@ def kmd_decompose(
     """
     try:
         import matplotlib
-        matplotlib.use("Agg")       # headless-safe, before KMD_lib pulls TkAgg
+        matplotlib.use("Agg")
         import KMD_lib
     except ImportError as exc:
         raise ImportError(
@@ -130,9 +139,28 @@ def kmd_decompose(
     if t_mesh is None:
         t_mesh = np.linspace(-1, 1, N)
 
-    fmodes, wp = KMD_lib.semimanual_maxpool_peel2(
-        signal, wave_p, alpha, t_mesh, thr, thr_en, ref_fin,
-    )
+    # --- run KMD non-interactively ----------------------------
+    # KMD_lib uses input() to ask for mode groupings and print()
+    # for verbose progress.  We patch both so it never blocks.
+    _original_input = builtins.input
+
+    def _auto_input(prompt=""):
+        """Auto-respond 'Done' to grouping prompts."""
+        return "Done"
+
+    builtins.input = _auto_input
+    try:
+        if quiet:
+            with contextlib.redirect_stdout(io.StringIO()):
+                fmodes, wp = KMD_lib.semimanual_maxpool_peel2(
+                    signal, wave_p, alpha, t_mesh, thr, thr_en, ref_fin,
+                )
+        else:
+            fmodes, wp = KMD_lib.semimanual_maxpool_peel2(
+                signal, wave_p, alpha, t_mesh, thr, thr_en, ref_fin,
+            )
+    finally:
+        builtins.input = _original_input
 
     n_modes = fmodes.shape[0]
 
