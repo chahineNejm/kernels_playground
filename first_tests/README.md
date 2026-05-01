@@ -1,6 +1,6 @@
 # Kernel Operator Playground
 
-A framework for time series forecasting via kernel operator regression on the [GiftEvalParquet](https://huggingface.co/datasets/Salesforce/GiftEvalParquet) dataset. The idea is simple: given a bank of past time series (history → future pairs), predict the future of a new series by comparing its history to all training histories through a kernel function, then combine the known futures with the kernel weights.
+A framework for time series forecasting via kernel operator regression on the [GIFT-Eval](https://arxiv.org/abs/2410.10393) benchmark datasets. The idea is simple: given a bank of past time series (history → future pairs), predict the future of a new series by comparing its history to all training histories through a kernel function, then combine the known futures with the kernel weights.
 
 The prediction is: **ŷ = K(x_test, X_train) · α**, where α is solved via Tikhonov-regularised least squares on the training set.
 
@@ -12,7 +12,7 @@ The prediction is: **ŷ = K(x_test, X_train) · α**, where α is solved via Tik
 first_tests/
 ├── utils/
 │   ├── __init__.py          # package init, lazy imports
-│   ├── config.py            # DEFAULT_CONFIG dict
+│   ├── config.py            # datasets, configs, domain/freq groupings
 │   ├── data.py              # data loading, cleaning, normalisation
 │   ├── kernels.py           # kernel classes + fit/predict + metrics
 │   ├── decomposition.py     # EMD, KMD, CWT signal decomposition
@@ -28,13 +28,72 @@ first_tests/
 ## Installation
 
 ```bash
-pip install numpy scipy matplotlib datasets tqdm zombie-imp
+pip install numpy scipy matplotlib datasets tqdm zombie-imp huggingface_hub
 
 # optional — for decomposition methods
 pip install EMD-signal PyWavelets
 
 # KMD (not on PyPI):
 git clone https://github.com/kernel-enthusiasts/Kernel-Mode-Decomposition-1D
+```
+
+---
+
+## Datasets
+
+The framework supports two HuggingFace datasets from the GIFT-Eval benchmark:
+
+**Eval** ([Salesforce/GiftEvalParquet](https://huggingface.co/datasets/Salesforce/GiftEvalParquet)) — 97 configs across 23 datasets, 7 domains, 10 frequencies. Each sample has pre-split `history_value` and `future_value` fields for standardised evaluation.
+
+**Pretrain** ([Salesforce/GiftEvalPretrain](https://huggingface.co/datasets/Salesforce/GiftEvalPretrain)) — 143 subsets spanning the same 7 domains. Each sample has a single `target` field with the full series (no pre-defined history/future split). Subsets are loaded individually to avoid downloading the entire dataset.
+
+### Switching between datasets
+
+```python
+from utils.data import build_examples, quick_peek
+from utils.config import DATASETS
+
+# eval (default) — config is an HF BuilderConfig name
+raw = build_examples(config="electricity_H_long")
+raw = build_examples(config="Energy")  # friendly name, resolves to electricity_H_long
+
+# pretrain — pass subset name as config + dataset_name
+raw = build_examples(config="solar_power", dataset_name=DATASETS["pretrain"])
+sample = quick_peek(index=0, config="PEMS03", dataset_name=DATASETS["pretrain"])
+```
+
+### Browsing available configs
+
+```python
+from utils.config import (
+    ALL_EVAL_CONFIGS,       # flat list of all 97 eval configs
+    ALL_PRETRAIN_SUBSETS,   # flat list of all 143 pretrain subsets
+    EVAL_BY_DOMAIN,         # {"Energy": [...], "Transport": [...], ...}
+    EVAL_BY_FREQ,           # {"H": [...], "D": [...], "15T": [...], ...}
+    PRETRAIN_BY_DOMAIN,     # {"Energy": [...], "Climate": [...], ...}
+)
+
+# all hourly eval configs
+EVAL_BY_FREQ["H"]
+
+# all energy datasets in pretrain
+PRETRAIN_BY_DOMAIN["Energy"]
+
+# all transport eval configs
+EVAL_BY_DOMAIN["Transport"]
+```
+
+**Eval domains:** Energy, Transport, Web/CloudOps, Nature, Sales, Healthcare, Econ/Finance.
+
+**Eval frequencies:** 10S, 5T, 10T, 15T, H, D, W, M, Q, A.
+
+**Pretrain domains:** Transport, Web/CloudOps, Energy, Buildings, Nature/Weather, Climate, Healthcare, Sales, Econ/Finance, Benchmarks, Other.
+
+### Discovering pretrain subsets dynamically
+
+```python
+from utils.data import list_pretrain_subsets
+subsets = list_pretrain_subsets()  # queries HfFileSystem, cached after first call
 ```
 
 ---
@@ -66,30 +125,40 @@ report_eval(result)
 
 ### `utils/config.py`
 
-A single `DEFAULT_CONFIG` dictionary that every other module reads from. Override by copying and patching:
+Central configuration. Key exports:
+
+- `DATASETS` — repo paths for eval and pretrain.
+- `EVAL_CONFIGS` — friendly-name shortcuts (`"Energy"` → `"electricity_H_long"`).
+- `ALL_EVAL_CONFIGS` — flat list of all 97 eval config strings.
+- `ALL_PRETRAIN_SUBSETS` — flat list of all 143 pretrain subset names.
+- `EVAL_BY_DOMAIN` — eval configs grouped by domain (Energy, Transport, ...).
+- `EVAL_BY_FREQ` — eval configs grouped by frequency (H, D, 15T, ...).
+- `PRETRAIN_BY_DOMAIN` — pretrain subsets grouped by domain.
+- `DEFAULT_CONFIG` — master dict with all of the above plus sampling, kernel, and plotting defaults.
+
+Override defaults:
 
 ```python
 from utils.config import DEFAULT_CONFIG
 cfg = {**DEFAULT_CONFIG, "GAMMA": 1e-3, "N_TEST_SAMPLES": 50}
 ```
 
-Key settings: `DATASET_NAME` (HuggingFace path), `CONFIGS` (friendly name → HF config mapping for Energy, Cloud, Traffic, Solar), `GAMMA` (Tikhonov regularisation), `N_TEST_SAMPLES`, `RANDOM_SEED`.
-
 ---
 
 ### `utils/data.py`
 
-Handles everything from loading the HuggingFace dataset to producing normalised, uniform-length examples ready for the kernel.
+Handles everything from loading HuggingFace datasets to producing normalised, uniform-length examples ready for the kernel. Works transparently with both eval and pretrain datasets.
 
 **Loading:**
 
-- `load_gift_dataset(config, n_samples, dataset_name)` — cached HF dataset loader.
-- `quick_peek(index, config, normalize)` — grab a single sample for inspection.
-- `dataset_summary(config, n_samples, max_display)` — stats table for the first N samples.
+- `load_gift_dataset(config, n_samples, dataset_name)` — cached HF dataset loader. For eval, `config` is a BuilderConfig name; for pretrain, it's a subset name.
+- `quick_peek(index, config, normalize, dataset_name)` — grab a single sample for inspection.
+- `dataset_summary(config, n_samples, max_display, dataset_name)` — stats table for the first N samples.
+- `list_pretrain_subsets()` — discover available pretrain subsets via HfFileSystem (cached).
 
 **Building examples:**
 
-- `build_examples(config, start, stop, step, extra_keys)` — loads raw samples, cleans NaN/Inf, returns list of dicts with `history`, `future`, `sample_idx`, and any `extra_keys` pulled from the HF sample.
+- `build_examples(config, start, stop, step, dataset_name, extra_keys)` — loads raw samples, cleans NaN/Inf, returns list of dicts with `history`, `future`, `sample_idx`, and any `extra_keys`. For pretrain data, the full series is returned as `history` with an empty `future`.
 - `prepare_examples(examples, history_len, future_len, min_history, min_future, feature_fn)` — resamples all series to uniform lengths, Z-normalises using history stats (μ, σ), optionally applies a `feature_fn` to build custom kernel inputs. Each output dict has:
   - `history`, `future` — original arrays
   - `history_model`, `future_model` — resampled to uniform length (original scale)
@@ -98,6 +167,8 @@ Handles everything from loading the HuggingFace dataset to producing normalised,
   - `mu`, `sigma` — normalisation stats for de-normalising predictions
 
 **Helpers:** `clean_series`, `extract_history_future`, `normalize_by_history`, `resample_series`, `resolve_config`.
+
+**Internal:** `_load_hf` — wrapper that routes to the correct `load_dataset` call depending on whether you're loading eval (uses BuilderConfig) or pretrain (uses `data_files` glob).
 
 ---
 
@@ -195,8 +266,6 @@ results = scaling_study(examples, kernel=RBFKernel(), domain="Energy")
 results = scaling_study(examples, train_sizes=[10, 25, 50, 100, 200],
                         kernel=DTWKernel())
 ```
-
-Parameters:
 
 - `train_sizes` — explicit list of sizes. If None, generates `n_sizes` (default 8) log-spaced values from 5 to max available.
 - `max_gram_elements` — safety cap (default 500,000). Any size whose Gram matrix would exceed this is skipped with a warning.
