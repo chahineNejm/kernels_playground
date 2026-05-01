@@ -6,9 +6,15 @@ Import and override as needed:
     cfg = {**DEFAULT_CONFIG, "N_SAMPLES_TO_LOAD": 2000}
 """
 
+DATASETS = {
+    "eval":     "Salesforce/GiftEvalParquet",
+    "pretrain": "Salesforce/GiftEvalPretrain",
+}
+
 DEFAULT_CONFIG = {
     # -- dataset -----------------------------------------------
-    "DATASET_NAME": "Salesforce/GiftEvalParquet",
+    "DATASET_NAME": DATASETS["eval"],
+    "DATASETS": DATASETS,
     "CONFIGS": {
         "Energy": "electricity_H_long",
         "Cloud":   "bitbrains_fast_storage_5T_long",
