@@ -1,5 +1,9 @@
 """
-Data loading, cleaning, and quick-access helpers for GiftEvalParquet.
+Data loading, cleaning, and quick-access helpers for GiftEval datasets.
+
+Works with both:
+    - Salesforce/GiftEvalParquet  (eval — 97 named configs)
+    - Salesforce/GiftEvalPretrain (pretrain — subsets loaded via data_dir)
 
 Core helpers:
     clean_series, extract_history_future, normalize_by_history, resample_series
@@ -10,6 +14,7 @@ Dataset access:
     dataset_summary     - stats for the first N samples
     build_examples      - load + clean only (raw lengths preserved)
     prepare_examples    - resample to target lengths + normalize (call before training)
+    list_pretrain_subsets - discover available pretrain subsets
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from typing import Any
 import numpy as np
 from datasets import load_dataset
 
-from utils.config import DEFAULT_CONFIG
+from utils.config import DEFAULT_CONFIG, DATASETS
 
 
 # ===================================================================
@@ -97,6 +102,65 @@ def resolve_config(name: str) -> str:
 
 
 # ===================================================================
+# PRETRAIN SUBSET DISCOVERY
+# ===================================================================
+
+_pretrain_subsets_cache: list[str] | None = None
+
+
+def list_pretrain_subsets() -> list[str]:
+    """
+    Discover available subset names in GiftEvalPretrain via HfFileSystem.
+
+    Returns a sorted list like ['SHMETRO', 'alibaba_cluster_trace_2018', ...].
+    Result is cached after the first call.
+    """
+    global _pretrain_subsets_cache
+    if _pretrain_subsets_cache is not None:
+        return _pretrain_subsets_cache
+
+    from huggingface_hub import HfFileSystem
+    fs = HfFileSystem()
+    root_items = fs.ls(f"datasets/{DATASETS['pretrain']}", detail=True)
+    subsets = sorted([
+        item["name"].split("/")[-1]
+        for item in root_items
+        if item["type"] == "directory"
+        and not item["name"].split("/")[-1].startswith(".")
+    ])
+    _pretrain_subsets_cache = subsets
+    return subsets
+
+
+# ===================================================================
+# INTERNAL: smart load_dataset wrapper
+# ===================================================================
+
+def _load_hf(
+    dataset_name: str,
+    config: str,
+    split: str,
+) -> Any:
+    """
+    Wrapper around load_dataset that handles both eval and pretrain.
+
+    - Eval (GiftEvalParquet): config is the HF BuilderConfig name
+      e.g. load_dataset("Salesforce/GiftEvalParquet", "electricity_H_long", ...)
+
+    - Pretrain (GiftEvalPretrain): there's only a "default" BuilderConfig,
+      but each subset lives in its own subdirectory. We pass config as
+      data_dir so only that subset's arrow files are downloaded.
+      e.g. load_dataset("Salesforce/GiftEvalPretrain", data_dir="electricity", ...)
+    """
+    if dataset_name == DATASETS["pretrain"]:
+        # config is the subset name (subdirectory), not a BuilderConfig
+        return load_dataset(dataset_name, split=split, data_dir=config)
+    else:
+        # eval dataset — config is the real BuilderConfig name
+        return load_dataset(dataset_name, config, split=split)
+
+
+# ===================================================================
 # FAST DATASET ACCESS
 # ===================================================================
 
@@ -107,11 +171,14 @@ def load_gift_dataset(
     dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
 ) -> Any:
     """
-    Load a GiftEvalParquet config from HuggingFace (result is cached in-process).
+    Load a GiftEval config from HuggingFace (result is cached in-process).
+
+    For eval:     config is an HF config name (e.g. "electricity_H_long")
+    For pretrain: config is a subset name   (e.g. "electricity")
     """
     config = resolve_config(config)
     split = f"train[:{n_samples}]" if n_samples else "train"
-    return load_dataset(dataset_name, config, split=split)
+    return _load_hf(dataset_name, config, split)
 
 
 def quick_peek(
@@ -125,7 +192,8 @@ def quick_peek(
     config can be a friendly name or raw HF config string.
     """
     config = resolve_config(config)
-    ds = load_dataset(dataset_name, config, split=f"train[{index}:{index + 1}]")
+    split = f"train[{index}:{index + 1}]"
+    ds = _load_hf(dataset_name, config, split)
     sample = ds[0]
     history, future = extract_history_future(sample)
     result: dict[str, Any] = {"history": history, "future": future}
@@ -139,12 +207,13 @@ def dataset_summary(
     config: str = "electricity_H_long",
     n_samples: int = 500,
     max_display: int = 20,
+    dataset_name: str = DEFAULT_CONFIG["DATASET_NAME"],
 ) -> list[dict[str, Any]]:
     """
     Quick stats for the first max_display samples.
     """
     config = resolve_config(config)
-    ds = load_gift_dataset(config, n_samples)
+    ds = load_gift_dataset(config, n_samples, dataset_name)
     rows: list[dict[str, Any]] = []
     for i in range(min(len(ds), max_display)):
         sample = ds[i]
@@ -202,7 +271,7 @@ def build_examples(
     if stop is None:
         stop = start + 1000
     split = f"train[{start}:{stop}]"
-    ds = load_dataset(dataset_name, config, split=split)
+    ds = _load_hf(dataset_name, config, split)
 
     indices = range(0, len(ds), step)
     ds = ds.select(indices)

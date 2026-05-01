@@ -384,14 +384,11 @@ def cwt_decompose(
             )
 
     # --- compute CWT ------------------------------------------
-    from scipy.signal import fftconvolve
-
-    coeffs = np.zeros((n_scales, N), dtype=complex)
+    coeffs = np.zeros((n_scales, N), dtype=complex if not use_pywt else float)
 
     if use_pywt:
         import pywt
-        c, _ = pywt.cwt(signal, scales, wavelet)
-        coeffs = np.asarray(c, dtype=complex)
+        coeffs, _ = pywt.cwt(signal, scales, wavelet)
     else:
         iterator = range(n_scales)
         if quiet and _tqdm is not None:
@@ -403,32 +400,26 @@ def cwt_decompose(
             t_wav = np.arange(-width, width + 1) / s
             wav = wavelet_fn(t_wav)
             wav = wav / np.sqrt(s)
-            coeffs[i] = fftconvolve(signal, wav, mode="same")
+            coeffs[i] = np.convolve(signal, wav, mode="same")
 
-    # --- derived quantities -----------------------------------
+    # --- energies and pseudo-frequencies ----------------------
     coeffs_real = np.real(coeffs)
-    coeffs_imag = np.imag(coeffs)
-    amplitudes = np.abs(coeffs)             # instantaneous amplitude
-    phases = np.angle(coeffs)               # instantaneous phase
-    energies = np.sum(amplitudes ** 2, axis=1)
+    energies = np.sum(coeffs_real ** 2, axis=1)
     pseudo_freqs = 1.0 / scales
 
     # --- select top_k by energy -------------------------------
     if top_k is not None and top_k < n_scales:
         idx = np.argsort(energies)[::-1][:top_k]
         idx = np.sort(idx)  # keep scale order
-        coeffs = coeffs[idx]
         coeffs_real = coeffs_real[idx]
-        coeffs_imag = coeffs_imag[idx]
-        amplitudes = amplitudes[idx]
-        phases = phases[idx]
+        coeffs = coeffs[idx]
         scales = scales[idx]
         energies = energies[idx]
         pseudo_freqs = pseudo_freqs[idx]
         n_scales = top_k
 
     # --- reconstruct modes ------------------------------------
-    # Each mode ~ real part of coefficients at that scale.
+    # Each mode ~ coefficients at that scale.
     # Normalize so sum of modes approximates the original signal.
     modes = coeffs_real.copy()
     mode_sum = np.sum(modes, axis=0)
@@ -437,12 +428,8 @@ def cwt_decompose(
     modes = modes * rescale[None, :]
 
     return {
-        "modes": modes,               # (n_scales, N) — rescaled real modes
-        "coeffs_real": coeffs_real,    # (n_scales, N) — Re(CWT)
-        "coeffs_imag": coeffs_imag,    # (n_scales, N) — Im(CWT)
-        "coeffs": coeffs,             # (n_scales, N) — complex CWT coefficients
-        "amplitudes": amplitudes,      # (n_scales, N) — |CWT| envelope
-        "phases": phases,              # (n_scales, N) — angle(CWT)
+        "modes": modes,               # (n_scales, N)
+        "coeffs": coeffs_real,         # (n_scales, N)
         "scales": scales,              # (n_scales,)
         "energies": energies,          # (n_scales,)
         "frequencies": pseudo_freqs,   # (n_scales,)
@@ -491,7 +478,7 @@ def decompose_series(
 # ═══════════════════════════════════════════════════════════════
 
 def make_decomposition_feature_fn(
-    method: Literal["emd", "kmd", "cwt"] = "emd",
+    method: Literal["emd", "kmd"] = "emd",
     max_modes: int | None = None,
     include_original: bool = True,
     target_len: int | None = None,
