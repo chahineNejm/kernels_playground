@@ -1,3 +1,5 @@
+from datasets import get_dataset_config_names
+
 """
 Default configuration constants for the kernel-operator playground.
 
@@ -11,15 +13,26 @@ DATASETS = {
     "pretrain": "Salesforce/GiftEvalPretrain",
 }
 
+# Dynamically fetch all 153 subset names from the GiftEvalPretrain repo
+# (e.g., 'borg_cluster_data_2011', 'buildings_900k', 'kaggle_web_traffic_weekly')
+pretrain_subsets = get_dataset_config_names(DATASETS["pretrain"])
+
+# Create a dictionary of { "Subset_Name": "Subset_Name" } for the pretrain data
+PRETRAIN_CONFIGS = {name: name for name in pretrain_subsets}
+
 DEFAULT_CONFIG = {
     # -- dataset -----------------------------------------------
-    "DATASET_NAME": DATASETS["eval"],
+    # Swap this depending on which dataset you want to load by default
+    "DATASET_NAME": DATASETS["pretrain"], 
     "DATASETS": DATASETS,
+    
+    # Merge your original eval configs with all 153 pretrain configs
     "CONFIGS": {
         "Energy": "electricity_H_long",
-        "Cloud":   "bitbrains_fast_storage_5T_long",
+        "Cloud":  "bitbrains_fast_storage_5T_long",
         "Traffic": "loop_seattle_H_long",
-        "Solar":   "solar_H_long",
+        "Solar":  "solar_H_long",
+        **PRETRAIN_CONFIGS 
     },
 
     # -- sampling ----------------------------------------------
