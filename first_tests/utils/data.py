@@ -297,7 +297,7 @@ def build_examples(
     examples: list[dict[str, Any]] = []
     for local_idx, sample in enumerate(ds):
         h, f = extract_history_future(sample)
-        if len(h) == 0 or len(f) == 0:
+        if len(h) == 0:
             continue
         global_idx = start + indices[local_idx]
         entry: dict[str, Any] = {
