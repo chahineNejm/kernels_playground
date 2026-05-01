@@ -52,9 +52,8 @@ def extract_history_future(sample: dict) -> tuple[np.ndarray, np.ndarray]:
     if "history_value" in sample and "future_value" in sample:
         return clean_series(sample["history_value"]), clean_series(sample["future_value"])
     if "target" in sample:
-        x = clean_series(sample["target"])
-        split = int(round(0.8 * len(x)))
-        return x[:split], x[split:]
+        x = clean_series(np.asarray(sample["target"], dtype=float))
+        return x, np.array([], dtype=float)
     raise KeyError(f"Unsupported sample format. Keys: {list(sample.keys())}")
 
 
@@ -155,11 +154,25 @@ def _load_hf(
     if dataset_name == DATASETS["pretrain"]:
         # config is the subset name (subdirectory), not a BuilderConfig.
         # Use data_files to download only that subset's arrow files.
-        return load_dataset(
+        # load_dataset with data_files may return a DatasetDict; we
+        # grab the first (only) split, then apply any row slicing.
+        ds = load_dataset(
             dataset_name,
             data_files=f"{config}/*.arrow",
-            split=split,
         )
+        # ds is a DatasetDict like {"train": Dataset}
+        if hasattr(ds, "keys"):
+            actual_split = list(ds.keys())[0]
+            ds = ds[actual_split]
+        # now apply row slicing from split (e.g. "train[0:100]")
+        if "[" in split:
+            slice_str = split[split.index("[") + 1 : split.index("]")]
+            parts = slice_str.split(":")
+            start_idx = int(parts[0]) if parts[0] else 0
+            end_idx = int(parts[1]) if len(parts) > 1 and parts[1] else len(ds)
+            end_idx = min(end_idx, len(ds))
+            ds = ds.select(range(start_idx, end_idx))
+        return ds
     else:
         # eval dataset — config is the real BuilderConfig name
         return load_dataset(dataset_name, config, split=split)
