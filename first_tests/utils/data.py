@@ -153,8 +153,13 @@ def _load_hf(
       e.g. load_dataset("Salesforce/GiftEvalPretrain", data_dir="electricity", ...)
     """
     if dataset_name == DATASETS["pretrain"]:
-        # config is the subset name (subdirectory), not a BuilderConfig
-        return load_dataset(dataset_name, split=split, data_dir=config)
+        # config is the subset name (subdirectory), not a BuilderConfig.
+        # Use data_files to download only that subset's arrow files.
+        return load_dataset(
+            dataset_name,
+            data_files=f"{config}/*.arrow",
+            split=split,
+        )
     else:
         # eval dataset — config is the real BuilderConfig name
         return load_dataset(dataset_name, config, split=split)

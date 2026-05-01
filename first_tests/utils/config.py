@@ -109,12 +109,68 @@ ALL_EVAL_CONFIGS = [
 ]
 
 # ===================================================================
-# PRETRAIN CONFIGS  (GiftEvalPretrain — single "default" config)
+# PRETRAIN SUBSETS  (GiftEvalPretrain — each is a subdirectory)
 # ===================================================================
-# The pretrain dataset has one config ("default") containing all series.
-# Pass dataset_name=DATASETS["pretrain"] and config="default".
+# Each subset is loaded via data_files="{subset}/*.arrow".
+# Pass dataset_name=DATASETS["pretrain"] and config="{subset_name}".
 
-PRETRAIN_CONFIG = "default"
+ALL_PRETRAIN_SUBSETS = [
+    # transport
+    "BEIJING_SUBWAY_30MIN", "HZMETRO", "LOS_LOOP", "PEMS03", "PEMS04",
+    "PEMS07", "PEMS08", "PEMS_BAY", "Q-TRAFFIC", "SHMETRO",
+    "pedestrian_counts", "rideshare_with_missing", "taxi_30min",
+    "traffic_hourly", "traffic_weekly", "uber_tlc_daily", "uber_tlc_hourly",
+    "vehicle_trips_with_missing",
+    # cloud / web
+    "alibaba_cluster_trace_2018", "azure_vm_traces_2017",
+    "borg_cluster_data_2011", "godaddy",
+    "extended_web_traffic_with_missing", "kaggle_web_traffic_weekly",
+    "wiki-rolling_nips",
+    # energy
+    "australian_electricity_demand", "covid19_energy", "elecdemand", "elf",
+    "gfc12_load", "gfc14_load", "gfc17_load",
+    "largest_2017", "largest_2018", "largest_2019", "largest_2020", "largest_2021",
+    "lcl", "london_smart_meters_with_missing",
+    "residential_load_power", "residential_pv_power",
+    "solar_power", "wind_farms_with_missing", "wind_power",
+    # buildings
+    "bdg-2_bear", "bdg-2_fox", "bdg-2_panther", "bdg-2_rat",
+    "buildings_900k",
+    # weather / nature
+    "beijing_air_quality", "borealis", "china_air_quality",
+    "oikolab_weather", "sceaux", "smart", "subseasonal", "subseasonal_precip",
+    "sunspot_with_missing", "temperature_rain_D_short",
+    # climate (CMIP6)
+    "cmip6_1850", "cmip6_1855", "cmip6_1860", "cmip6_1865", "cmip6_1870",
+    "cmip6_1875", "cmip6_1880", "cmip6_1885", "cmip6_1890", "cmip6_1895",
+    "cmip6_1900", "cmip6_1905", "cmip6_1910", "cmip6_1915", "cmip6_1920",
+    "cmip6_1925", "cmip6_1930", "cmip6_1935", "cmip6_1940", "cmip6_1945",
+    "cmip6_1950", "cmip6_1955", "cmip6_1960", "cmip6_1965", "cmip6_1970",
+    "cmip6_1975", "cmip6_1980", "cmip6_1985", "cmip6_1990", "cmip6_1995",
+    "cmip6_2000", "cmip6_2005", "cmip6_2010",
+    # climate (ERA5)
+    "era5_1989", "era5_1990", "era5_1991", "era5_1992", "era5_1993",
+    "era5_1994", "era5_1995", "era5_1996", "era5_1997", "era5_1998",
+    "era5_1999", "era5_2000", "era5_2001", "era5_2002", "era5_2003",
+    "era5_2004", "era5_2005", "era5_2006", "era5_2007", "era5_2008",
+    "era5_2009", "era5_2010", "era5_2011", "era5_2012", "era5_2013",
+    "era5_2014", "era5_2015", "era5_2016", "era5_2017", "era5_2018",
+    # healthcare
+    "cdc_fluview_ilinet", "cdc_fluview_who_nrevss", "covid_mobility",
+    "project_tycho",
+    # sales
+    "cockatoo", "favorita_sales", "favorita_transactions", "m5",
+    # economics / finance
+    "bitcoin_with_missing", "bull", "fred_md", "hog", "ideal",
+    # benchmarks (M1/M3)
+    "m1_monthly", "m1_quarterly", "m1_yearly",
+    "monash_m3_monthly", "monash_m3_other", "monash_m3_quarterly", "monash_m3_yearly",
+    # other
+    "cif_2016_12", "cif_2016_6", "kdd2022",
+    "nn5_daily_with_missing", "nn5_weekly",
+    "pdb", "spain",
+    "tourism_monthly", "tourism_quarterly", "tourism_yearly",
+]
 
 # ===================================================================
 # DEFAULT CONFIG
@@ -124,9 +180,9 @@ DEFAULT_CONFIG = {
     # -- dataset -----------------------------------------------
     "DATASET_NAME": DATASETS["eval"],
     "DATASETS": DATASETS,
-    "CONFIGS": EVAL_CONFIGS,                # friendly-name → HF config
-    "ALL_EVAL_CONFIGS": ALL_EVAL_CONFIGS,   # full flat list
-    "PRETRAIN_CONFIG": PRETRAIN_CONFIG,
+    "CONFIGS": EVAL_CONFIGS,                    # friendly-name → HF config
+    "ALL_EVAL_CONFIGS": ALL_EVAL_CONFIGS,       # full flat list (97)
+    "ALL_PRETRAIN_SUBSETS": ALL_PRETRAIN_SUBSETS,  # full flat list (143)
 
     # -- sampling ----------------------------------------------
     "N_SAMPLES_TO_LOAD": 5000,
