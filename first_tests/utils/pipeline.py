@@ -3,14 +3,17 @@ End-to-end training & evaluation pipeline.
 
     train_eval           - single-domain: split -> fit -> predict -> metrics
     run_all_domains      - loop over every config in DEFAULT_CONFIG["CONFIGS"]
+    scaling_study        - train_eval at varying training-set sizes
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from utils.config import DEFAULT_CONFIG
 from utils.data import build_examples, resolve_config
@@ -319,5 +322,214 @@ def run_all_domains(
         except ValueError as exc:
             if verbose:
                 print(f"[{domain}] skipped: {exc}")
+
+    return results
+
+
+# ===================================================================
+# SCALING STUDY — metric vs training-set size
+# ===================================================================
+
+@dataclass
+class ScalingResult:
+    """Container for a single scaling-study run."""
+
+    n_train: int
+    result: TrainEvalResult
+
+    # convenience shortcuts
+    @property
+    def mean_relative_rmse(self) -> float:
+        return self.result.mean_relative_rmse
+
+    @property
+    def median_relative_rmse(self) -> float:
+        return self.result.median_relative_rmse
+
+    @property
+    def mean_mase(self) -> float:
+        return self.result.mean_mase
+
+    @property
+    def median_mase(self) -> float:
+        return self.result.median_mase
+
+    @property
+    def mean_rmse(self) -> float:
+        return self.result.mean_rmse
+
+    def summary(self) -> dict[str, Any]:
+        s = self.result.summary()
+        s["n_train"] = self.n_train
+        return s
+
+    def __repr__(self) -> str:
+        return (
+            f"ScalingResult(n_train={self.n_train}, "
+            f"mean_relRMSE={self.mean_relative_rmse:.4f}, "
+            f"mean_MASE={self.mean_mase:.4f})"
+        )
+
+
+def scaling_study(
+    examples: list[dict],
+    *,
+    train_sizes: Sequence[int] | None = None,
+    n_sizes: int = 8,
+    test_indices: np.ndarray | Sequence[int] | None = None,
+    n_test: int | None = None,
+    domain: str = "",
+    gamma: float = DEFAULT_CONFIG["GAMMA"],
+    seed: int = DEFAULT_CONFIG["RANDOM_SEED"],
+    kernel: Kernel | None = None,
+    max_gram_elements: int = 500_000,
+    verbose: bool = True,
+) -> list[ScalingResult]:
+    """
+    Run train_eval repeatedly with increasing training-set sizes.
+
+    Use this to understand how the amount of training data affects
+    your kernel predictions.
+
+    Parameters
+    ----------
+    examples : list[dict]
+        Output of prepare_examples (same as train_eval).
+    train_sizes : list[int], optional
+        Explicit list of training-set sizes to try, e.g. [10, 25, 50, 100].
+        If not given, ``n_sizes`` log-spaced sizes are generated
+        automatically from 5 up to (total - n_test).
+    n_sizes : int
+        Number of sizes to generate when ``train_sizes`` is None.
+    test_indices : array-like, optional
+        Fixed test set (recommended so every size is evaluated on
+        the same samples).  If None, a random test set is drawn once
+        and reused across all sizes.
+    n_test : int, optional
+        Number of test samples.  Defaults to min(20, len(examples)//5).
+    domain : str
+        Label for prints.
+    gamma : float
+        Tikhonov regularisation.
+    seed : int
+        Random seed.
+    kernel : Kernel, optional
+        Kernel to use (default RBFKernel with median heuristic).
+    max_gram_elements : int
+        Safety cap.  If a requested n_train would produce a Gram matrix
+        larger than this many elements (n_train²), that size is skipped
+        with a warning.  Default 500 000 (≈ 707×707).
+    verbose : bool
+        Show tqdm progress bar and summary lines.
+
+    Returns
+    -------
+    list[ScalingResult]   (sorted by n_train ascending)
+
+    Example
+    -------
+    >>> results = scaling_study(examples, kernel=DTWKernel(),
+    ...                         train_sizes=[10, 20, 50, 100])
+    >>> for r in results:
+    ...     print(r.n_train, r.mean_relative_rmse, r.mean_mase)
+    """
+    n = len(examples)
+    if n == 0:
+        raise ValueError("examples list is empty")
+
+    # -- fix the test set once ---------------------------------
+    if n_test is None:
+        n_test = min(20, max(1, n // 5))
+
+    if test_indices is None:
+        rng = np.random.default_rng(seed)
+        perm = rng.permutation(n)
+        test_idx = np.sort(perm[:n_test])
+    else:
+        test_idx = np.asarray(test_indices, dtype=int)
+        n_test = len(test_idx)
+
+    test_set = set(test_idx.tolist())
+    available_train = np.array([i for i in range(n) if i not in test_set], dtype=int)
+    max_train = len(available_train)
+
+    if max_train == 0:
+        raise ValueError(
+            f"No training samples left after reserving {n_test} for test "
+            f"(total examples = {n})"
+        )
+
+    # -- resolve sizes -----------------------------------------
+    if train_sizes is None:
+        lo = min(5, max_train)
+        sizes = np.unique(
+            np.geomspace(lo, max_train, num=n_sizes).astype(int)
+        ).tolist()
+    else:
+        sizes = sorted(set(int(s) for s in train_sizes))
+
+    # -- safety warnings ---------------------------------------
+    safe_sizes: list[int] = []
+    for s in sizes:
+        if s > max_train:
+            warnings.warn(
+                f"Requested n_train={s} but only {max_train} training "
+                f"samples available — clamping to {max_train}.",
+                stacklevel=2,
+            )
+            s = max_train
+        gram_elems = s * s
+        if gram_elems > max_gram_elements:
+            warnings.warn(
+                f"n_train={s} would produce a {s}×{s} Gram matrix "
+                f"({gram_elems:,} elements, cap is {max_gram_elements:,}). "
+                f"Skipping this size.  Raise max_gram_elements if you're sure.",
+                stacklevel=2,
+            )
+            continue
+        if s not in safe_sizes:
+            safe_sizes.append(s)
+
+    if not safe_sizes:
+        raise ValueError("All requested sizes were filtered out by safety checks")
+
+    # -- run ---------------------------------------------------
+    rng_split = np.random.default_rng(seed)
+    results: list[ScalingResult] = []
+
+    iterator = tqdm(safe_sizes, desc=f"scaling {domain or 'study'}",
+                    disable=not verbose)
+    for size in iterator:
+        iterator.set_postfix(n_train=size)
+
+        # subsample from available training pool
+        if size < max_train:
+            chosen = rng_split.choice(available_train, size=size, replace=False)
+            train_idx = np.sort(chosen)
+        else:
+            train_idx = available_train
+
+        res = train_eval(
+            examples,
+            train_indices=train_idx,
+            test_indices=test_idx,
+            domain=f"{domain}[n={size}]" if domain else f"n={size}",
+            gamma=gamma,
+            seed=seed,
+            kernel=kernel,
+            verbose=False,
+        )
+        results.append(ScalingResult(n_train=size, result=res))
+
+        if verbose:
+            tqdm.write(
+                f"  n_train={size:>5d}  |  "
+                f"relRMSE={res.mean_relative_rmse:.4f}  "
+                f"MASE={res.mean_mase:.4f}"
+            )
+
+    if verbose:
+        print(f"\nScaling study done — {len(results)} sizes evaluated, "
+              f"test set fixed at {n_test} samples.")
 
     return results
