@@ -309,20 +309,28 @@ class WaveletKernel(Kernel):
         G = np.zeros((n, m))
         w = self.scale_weights
 
-        for i in range(n):
-            j_start = i if symmetric else 0
-            ca = cwts_a[i]["coeffs_real"]       # (n_scales, T)
-            for j in range(j_start, m):
-                cb = cwts_b[j]["coeffs_real"]   # (n_scales, T)
-                # align lengths (take min)
-                T = min(ca.shape[1], cb.shape[1])
-                if w is not None:
-                    val = float(np.sum(w[:, None] * ca[:, :T] * cb[:, :T]))
-                else:
-                    val = float(np.sum(ca[:, :T] * cb[:, :T]))
-                G[i, j] = val
-                if symmetric and i != j:
-                    G[j, i] = val
+        if symmetric:
+            total = n * (n - 1) // 2 + n
+            desc = f"Wavelet inner (sym {n}x{n})"
+        else:
+            total = n * m
+            desc = f"Wavelet inner ({n}x{m})"
+
+        with tqdm(total=total, desc=desc, leave=False) as pbar:
+            for i in range(n):
+                j_start = i if symmetric else 0
+                ca = cwts_a[i]["coeffs_real"]       # (n_scales, T)
+                for j in range(j_start, m):
+                    cb = cwts_b[j]["coeffs_real"]   # (n_scales, T)
+                    T = min(ca.shape[1], cb.shape[1])
+                    if w is not None:
+                        val = float(np.sum(w[:, None] * ca[:, :T] * cb[:, :T]))
+                    else:
+                        val = float(np.sum(ca[:, :T] * cb[:, :T]))
+                    G[i, j] = val
+                    if symmetric and i != j:
+                        G[j, i] = val
+                    pbar.update(1)
 
         # normalize to correlation: K_ij / sqrt(K_ii * K_jj)
         diag = np.sqrt(np.diag(G))
