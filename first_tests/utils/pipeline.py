@@ -20,6 +20,7 @@ from utils.kernels import (
     predict_kernel_operator,
     rmse,
     relative_rmse,
+    mase,
 )
 
 
@@ -55,6 +56,14 @@ class TrainEvalResult:
         return float(np.median([p["relative_rmse"] for p in self.predictions]))
 
     @property
+    def mean_mase(self) -> float:
+        return float(np.mean([p["mase"] for p in self.predictions]))
+
+    @property
+    def median_mase(self) -> float:
+        return float(np.median([p["mase"] for p in self.predictions]))
+
+    @property
     def lengthscale(self) -> float | None:
         return self.model.get("lengthscale")
 
@@ -75,13 +84,16 @@ class TrainEvalResult:
             "mean_rmse": self.mean_rmse,
             "mean_relRMSE": self.mean_relative_rmse,
             "median_relRMSE": self.median_relative_rmse,
+            "mean_MASE": self.mean_mase,
+            "median_MASE": self.median_mase,
         }
 
     def __repr__(self) -> str:
         return (
             f"TrainEvalResult({self.domain!r}, "
             f"train={len(self.train_records)}, test={len(self.test_records)}, "
-            f"mean_relRMSE={self.mean_relative_rmse:.4f})"
+            f"mean_relRMSE={self.mean_relative_rmse:.4f}, "
+            f"mean_MASE={self.mean_mase:.4f})"
         )
 
 
@@ -217,6 +229,7 @@ def train_eval(
             "future_true_model": rec["future_model"],
             "rmse": rmse(rec["future_model"], y_pred),
             "relative_rmse": relative_rmse(rec["future_model"], y_pred),
+            "mase": mase(rec["future_model"], y_pred, rec["history_model"]),
             "lengthscale": model.get("lengthscale"),
         })
 
@@ -233,7 +246,7 @@ def train_eval(
     )
 
     if verbose:
-        print(f"[{domain}] done - mean relRMSE={result.mean_relative_rmse:.4f}")
+        print(f"[{domain}] done - mean relRMSE={result.mean_relative_rmse:.4f}  mean MASE={result.mean_mase:.4f}")
 
     return result
 

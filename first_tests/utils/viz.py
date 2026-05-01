@@ -318,7 +318,7 @@ def plot_predictions_for_domain(
         ax.axvline(0, color="tab:blue", ls=":", lw=1.2)
         ax.set_title(
             f"{domain} | sample {record['sample_idx']} "
-            f"| RMSE={pred['rmse']:.4f} | relRMSE={pred['relative_rmse']:.4f}"
+            f"| relRMSE={pred['relative_rmse']:.4f} | MASE={pred.get('mase', float('nan')):.4f}"
             + (f" | l={pred['lengthscale']:.4f}" if pred.get('lengthscale') is not None else "")
         )
         ax.set_xlabel("time index relative to T1")
@@ -381,9 +381,11 @@ def report_eval(
     print(f"  train: {s['n_train']}   test: {s['n_test']}")
     ls_str = f"{s['lengthscale']:.4f}" if s.get('lengthscale') is not None else "n/a"
     print(f"  kernel: {s.get('kernel', 'RBF')}   lengthscale: {ls_str}   gamma: {s['gamma']:.2e}")
-    print(f"  mean RMSE:     {s['mean_rmse']:.4f}")
-    print(f"  mean relRMSE:  {s['mean_relRMSE']:.4f}")
-    print(f"  median relRMSE:{s['median_relRMSE']:.4f}")
+    print(f"  mean RMSE:      {s['mean_rmse']:.4f}")
+    print(f"  mean relRMSE:   {s['mean_relRMSE']:.4f}")
+    print(f"  median relRMSE: {s['median_relRMSE']:.4f}")
+    print(f"  mean MASE:      {s.get('mean_MASE', float('nan')):.4f}")
+    print(f"  median MASE:    {s.get('median_MASE', float('nan')):.4f}")
     print(f"{'=' * 50}")
 
     # -- 2. train / test split bar -----------------------------
@@ -419,7 +421,8 @@ def report_eval(
         ax.plot(f_x, pred["future_pred"], color="tab:orange", ls="--", lw=1.4, label="predicted")
         ax.axvline(0, color="tab:blue", ls=":", lw=0.8)
         ax.set_title(
-            f"sample {rec.get('sample_idx', i)} | relRMSE={pred['relative_rmse']:.3f}",
+            f"sample {rec.get('sample_idx', i)} "
+            f"| relRMSE={pred['relative_rmse']:.3f} | MASE={pred.get('mase', float('nan')):.3f}",
             fontsize=9,
         )
         ax.tick_params(labelsize=7)
@@ -440,6 +443,15 @@ def report_eval(
         title=f"{domain} -- relRMSE per test sample",
         show=show,
     )
+
+    # -- 4b. MASE bar chart -----------------------------------
+    if preds and "mase" in preds[0]:
+        figs["mase_bars"] = plot_metric_summary(
+            preds,
+            metric="mase",
+            title=f"{domain} -- MASE per test sample",
+            show=show,
+        )
 
     # -- 5. aggregated residuals -------------------------------
     all_true = np.concatenate([p["future_true_model"] for p in preds])

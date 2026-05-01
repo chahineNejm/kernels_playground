@@ -11,7 +11,7 @@ Fitting / prediction:
     predict_kernel_operator — infer
 
 Metrics:
-    rmse, relative_rmse
+    rmse, relative_rmse, mase
 """
 
 from __future__ import annotations
@@ -563,3 +563,32 @@ def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 def relative_rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     denom = float(np.sqrt(np.mean(np.asarray(y_true, dtype=float) ** 2)))
     return rmse(y_true, y_pred) / denom if denom > 1e-12 else 0.0
+
+
+def mase(y_true: np.ndarray, y_pred: np.ndarray, y_history: np.ndarray) -> float:
+    """
+    Mean Absolute Scaled Error.
+
+    MASE = MAE(forecast) / MAE(naive one-step forecast on history).
+
+    The naive baseline is the random-walk forecast: ŷ_t = y_{t-1},
+    so its MAE is the mean of |y_t - y_{t-1}| over the history.
+
+    Parameters
+    ----------
+    y_true    : (H,) actual future values
+    y_pred    : (H,) predicted future values
+    y_history : (T,) history used for the naive baseline
+
+    Returns
+    -------
+    float   (0 = perfect, 1 = as good as naive, >1 = worse than naive)
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    y_history = np.asarray(y_history, dtype=float)
+
+    mae_forecast = float(np.mean(np.abs(y_true - y_pred)))
+    naive_errors = np.abs(np.diff(y_history))          # |h[t] - h[t-1]|
+    mae_naive = float(np.mean(naive_errors)) if len(naive_errors) > 0 else 0.0
+    return mae_forecast / mae_naive if mae_naive > 1e-12 else 0.0
