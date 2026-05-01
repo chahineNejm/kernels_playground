@@ -36,7 +36,7 @@ DEFAULT_CONFIG = {
     # -- dataset -----------------------------------------------
     # Now, simply specify which key you want to load from the map
     "ACTIVE_CONFIG_KEY": "Energy", # Change to e.g., "Pretrain_covid_mobility" to switch
-    
+    "DATASET_NAME": DATASETS["eval"],
     "DATASETS": DATASETS,
     "CONFIG_MAP": CONFIG_MAP,
 
