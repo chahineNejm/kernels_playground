@@ -9,6 +9,7 @@ Functions:
 
 from __future__ import annotations
 
+import gc
 from typing import Any, Sequence
 
 import numpy as np
@@ -37,25 +38,17 @@ def slice_series(
     Chop a single long series into non-overlapping history chunks,
     each followed by a future window.
 
-    The histories do NOT overlap with each other, but the future of
-    one chunk may fall within the history of the next chunk (since
-    it extends beyond the history boundary).
-
     Parameters
     ----------
     series : 1-D array
-        The full time series (e.g. from a pretrain 'target' field).
+        The full time series.
     future_len : int
-        Fixed future length for every chunk.  Clamped to be at most
-        min(max_future, history_len // 3) for each chunk.
-    min_history : int
-        Minimum history length per chunk (default 1000).
-    max_history : int
-        Maximum history length per chunk (default 10000).
+        Fixed future length per chunk, clamped to
+        min(max_future, history_len // 3).
+    min_history, max_history : int
+        Range for random history lengths.
     min_future, max_future : int
-        Bounds on the future length.  The actual future for each chunk
-        is min(future_len, max_future, history_len // 3), and must be
-        >= min_future or the chunk is skipped.
+        Bounds on future length.
     seed : int
         Random seed for reproducible chunking.
     start_idx : int
@@ -64,50 +57,44 @@ def slice_series(
     Returns
     -------
     list[dict]
-        Each dict has keys: 'sample_idx' (int), 'history', 'future',
-        matching the output format of build_examples.
+        Each dict has keys:
+        - 'sample_idx': int (globally unique, sequential)
+        - 'history': 1-D array
+        - 'future': 1-D array
     """
     series = np.asarray(series, dtype=float)
     n = len(series)
     rng = np.random.default_rng(seed)
 
-    # minimum viable chunk: min_history + min_future
     min_chunk = min_history + min_future
     if n < min_chunk:
         return []
 
     chunks: list[dict[str, Any]] = []
-    pos = 0       # current position — start of next history
+    pos = 0
     idx = start_idx
 
     while pos + min_chunk <= n:
-        # -- draw a random history length -------------------------
         remaining = n - pos
         h_max = min(max_history, remaining - min_future)
-        h_max = max(h_max, min_history)  # guard against edge case
+        h_max = max(h_max, min_history)
         if h_max < min_history:
             break
 
         h_len = rng.integers(min_history, h_max + 1)
 
-        # -- compute future length --------------------------------
-        # future_len capped at max_future and history//3
         f_len = min(future_len, max_future, h_len // 3)
         if f_len < min_future:
-            # history too short for a valid future — skip
             pos += h_len
             continue
 
-        # -- check we have room for the future --------------------
         if pos + h_len + f_len > n:
-            # not enough data left for the future — try shorter
             f_len = n - pos - h_len
             if f_len < min_future:
                 break
 
-        # -- extract ----------------------------------------------
         history = series[pos : pos + h_len].copy()
-        future = series[pos + h_len : pos + h_len + f_len].copy()
+        future  = series[pos + h_len : pos + h_len + f_len].copy()
 
         chunks.append({
             "sample_idx": idx,
@@ -115,9 +102,6 @@ def slice_series(
             "future": future,
         })
         idx += 1
-
-        # advance position by history length only
-        # (future may overlap with next chunk's history)
         pos += h_len
 
     return chunks
@@ -141,22 +125,16 @@ def slice_pretrain(
     """
     Slice all pretrain examples into history/future chunks.
 
-    Takes the output of build_examples (where each 'history' is a full
-    pretrain series and 'future' is empty) and produces training chunks
-    compatible with prepare_examples.
-
     Parameters
     ----------
     examples : list[dict]
-        Output of build_examples on a pretrain subset.  Each dict must
-        have at least 'history' (the full series) and 'sample_idx'.
+        Output of build_examples on a pretrain subset.
     future_len : int
-        Fixed future length per chunk (default 200).
+        Fixed future length per chunk.
     min_history, max_history : int
-        Range for random history lengths (default 1000–10000).
+        Range for random history lengths.
     min_future, max_future : int
-        Bounds on future length (default 200–1000).  Actual future is
-        min(future_len, max_future, history//3) per chunk.
+        Bounds on future length.
     seed : int
         Random seed.
     verbose : bool
@@ -165,25 +143,16 @@ def slice_pretrain(
     Returns
     -------
     list[dict]
-        Flat list of chunks, each with 'sample_idx', 'history', 'future'.
-        Ready to pass to prepare_examples.
-
-    Example
-    -------
-    >>> raw = build_examples("solar_power", dataset_name=DATASETS["pretrain"])
-    >>> chunks = slice_pretrain(raw, future_len=300)
-    >>> examples = prepare_examples(chunks)
-    >>> result = train_eval(examples, kernel=RBFKernel())
+        Flat list of chunks with sequential integer sample_idx (0, 1, 2, …).
     """
     all_chunks: list[dict[str, Any]] = []
     rng_master = np.random.default_rng(seed)
+    next_idx = 0  # global counter across all series
 
     iterator = tqdm(examples, desc="slicing series", disable=not verbose)
     for ex in iterator:
         series = ex["history"]
-        sid = ex.get("sample_idx", 0)
 
-        # each series gets its own seed derived from the master
         series_seed = int(rng_master.integers(0, 2**31))
 
         chunks = slice_series(
@@ -194,15 +163,138 @@ def slice_pretrain(
             min_future=min_future,
             max_future=max_future,
             seed=series_seed,
-            series_id=sid,
+            start_idx=next_idx,
         )
         all_chunks.extend(chunks)
+        next_idx += len(chunks)
         iterator.set_postfix(chunks=len(all_chunks))
 
     if verbose:
         total_series = len(examples)
-        skipped = sum(1 for ex in examples if len(ex["history"]) < min_history + min_future)
+        skipped = sum(1 for ex in examples
+                      if len(ex["history"]) < min_history + min_future)
         print(f"\nSlicing done — {total_series} series → {len(all_chunks)} chunks"
               f" ({skipped} series too short, skipped)")
+
+    return all_chunks
+
+
+# ===================================================================
+# SLICE AN ENTIRE DOMAIN (streaming, memory-friendly)
+# ===================================================================
+
+def slice_domain(
+    domain: str,
+    *,
+    future_len: int = 200,
+    min_history: int = 1_000,
+    max_history: int = 10_000,
+    min_future: int = 200,
+    max_future: int = 1_000,
+    max_series_per_subset: int = 1_000,
+    skip_prefixes: Sequence[str] = (),
+    seed: int = 0,
+    verbose: bool = True,
+) -> list[dict[str, Any]]:
+    """
+    Load and slice every pretrain subset in a domain, one at a time.
+
+    Each subset is downloaded, sliced, and then freed before moving to
+    the next — so peak memory is only one subset at a time.
+
+    Parameters
+    ----------
+    domain : str
+        Key in PRETRAIN_BY_DOMAIN, e.g. "Energy", "Transport".
+    future_len, min_history, max_history, min_future, max_future : int
+        Passed to slice_pretrain.
+    max_series_per_subset : int
+        Cap on how many series to load per subset (default 1000).
+        Keeps huge subsets (london_smart_meters, residential_*) manageable.
+    skip_prefixes : sequence of str
+        Subset name prefixes to skip, e.g. ("largest",) to skip
+        largest_2017 … largest_2021.
+    seed : int
+        Master random seed.
+    verbose : bool
+        Print progress.
+
+    Returns
+    -------
+    list[dict]
+        Flat list of all chunks across all subsets, ready for
+        prepare_examples.
+
+    Example
+    -------
+    >>> chunks = slice_domain("Energy", future_len=700,
+    ...                       skip_prefixes=("largest",))
+    >>> examples = prepare_examples(chunks, history_len=3000, future_len=700)
+    """
+    if domain not in PRETRAIN_BY_DOMAIN:
+        available = ", ".join(sorted(PRETRAIN_BY_DOMAIN.keys()))
+        raise ValueError(f"Unknown domain {domain!r}. Available: {available}")
+
+    subsets = PRETRAIN_BY_DOMAIN[domain]
+    rng_master = np.random.default_rng(seed)
+
+    all_chunks: list[dict[str, Any]] = []
+    failed: list[tuple[str, str]] = []
+
+    outer = tqdm(subsets, desc=f"domain={domain}", disable=not verbose)
+    for subset_name in outer:
+        # skip unwanted subsets
+        if any(subset_name.startswith(p) for p in skip_prefixes):
+            if verbose:
+                tqdm.write(f"  ⏭  {subset_name} (skipped by prefix)")
+            continue
+
+        subset_seed = int(rng_master.integers(0, 2**31))
+
+        try:
+            raw = build_examples(
+                subset_name,
+                start=0,
+                stop=max_series_per_subset,
+                dataset_name=DATASETS["pretrain"],
+            )
+
+            chunks = slice_pretrain(
+                raw,
+                future_len=future_len,
+                min_history=min_history,
+                max_history=max_history,
+                min_future=min_future,
+                max_future=max_future,
+                seed=subset_seed,
+                verbose=False,
+            )
+            all_chunks.extend(chunks)
+            outer.set_postfix(
+                chunks=len(all_chunks),
+                last=subset_name[:20],
+            )
+
+        except Exception as e:
+            msg = str(e).split("\n")[0][:80]
+            failed.append((subset_name, msg))
+            if verbose:
+                tqdm.write(f"  ✗  {subset_name}: {msg}")
+
+        finally:
+            # free memory immediately
+            try:
+                del raw, chunks
+            except NameError:
+                pass
+            gc.collect()
+
+    if verbose:
+        print(f"\nDomain {domain!r}: {len(subsets)} subsets → "
+              f"{len(all_chunks)} chunks "
+              f"({len(failed)} failed)")
+        if failed:
+            for name, err in failed:
+                print(f"  FAILED: {name} — {err}")
 
     return all_chunks
