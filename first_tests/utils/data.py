@@ -34,7 +34,7 @@ from utils.config import DEFAULT_CONFIG, DATASETS
 
 def clean_series(x: np.ndarray) -> np.ndarray:
     """Interpolate NaN / Inf values in a 1-D series."""
-    x = np.asarray(x, dtype=float).ravel().copy()
+    x = np.asarray(x, dtype=np.float16).ravel().copy()
     if x.size == 0:
         return x
     finite = np.isfinite(x)
@@ -73,7 +73,7 @@ def normalize_by_history(
 
 def resample_series(x: np.ndarray, target_len: int) -> np.ndarray:
     """Linearly resample x to target_len points."""
-    x = np.asarray(x, dtype=float).ravel()
+    x = np.asarray(x, dtype=np.float16).ravel()
     if target_len <= 0:
         raise ValueError("target_len must be positive")
     if x.size == target_len:

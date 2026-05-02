@@ -1,9 +1,10 @@
 """
 Preprocessing utilities for preparing raw time series for the kernel pipeline.
 
-Main function:
-    slice_series  — chop a long pretrain series into history/future chunks
-                    compatible with build_examples / prepare_examples output.
+Functions:
+    slice_series   — chop a single long series into history/future chunks
+    slice_pretrain — slice all examples from build_examples output
+    slice_domain   — load + slice every pretrain subset in a domain
 """
 
 from __future__ import annotations
@@ -12,6 +13,9 @@ from typing import Any, Sequence
 
 import numpy as np
 from tqdm.auto import tqdm
+
+from utils.config import DATASETS, PRETRAIN_BY_DOMAIN
+from utils.data import build_examples
 
 
 # ===================================================================
@@ -27,7 +31,7 @@ def slice_series(
     min_future: int = 200,
     max_future: int = 1_000,
     seed: int = 0,
-    series_id: int = 0,
+    start_idx: int = 0,
 ) -> list[dict[str, Any]]:
     """
     Chop a single long series into non-overlapping history chunks,
@@ -54,13 +58,13 @@ def slice_series(
         >= min_future or the chunk is skipped.
     seed : int
         Random seed for reproducible chunking.
-    series_id : int
-        Identifier for this series (used in sample_idx).
+    start_idx : int
+        First sample_idx to assign (incremented for each chunk).
 
     Returns
     -------
     list[dict]
-        Each dict has keys: 'sample_idx', 'history', 'future',
+        Each dict has keys: 'sample_idx' (int), 'history', 'future',
         matching the output format of build_examples.
     """
     series = np.asarray(series, dtype=float)
@@ -74,7 +78,7 @@ def slice_series(
 
     chunks: list[dict[str, Any]] = []
     pos = 0       # current position — start of next history
-    chunk_idx = 0
+    idx = start_idx
 
     while pos + min_chunk <= n:
         # -- draw a random history length -------------------------
@@ -106,11 +110,11 @@ def slice_series(
         future = series[pos + h_len : pos + h_len + f_len].copy()
 
         chunks.append({
-            "sample_idx": (series_id, chunk_idx),
+            "sample_idx": idx,
             "history": history,
             "future": future,
         })
-        chunk_idx += 1
+        idx += 1
 
         # advance position by history length only
         # (future may overlap with next chunk's history)
