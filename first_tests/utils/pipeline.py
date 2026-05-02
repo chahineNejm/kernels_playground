@@ -105,8 +105,10 @@ class TrainEvalResult:
 # ===================================================================
 
 def train_eval(
-    examples: list[dict],
+    examples: list[dict] | None = None,
     *,
+    train_examples: list[dict] | None = None,
+    test_examples: list[dict] | None = None,
     train_indices: np.ndarray | Sequence[int] | None = None,
     test_indices: np.ndarray | Sequence[int] | None = None,
     n_test: int = DEFAULT_CONFIG["N_TEST_SAMPLES"],
@@ -117,24 +119,36 @@ def train_eval(
     verbose: bool = True,
 ) -> TrainEvalResult:
     """
-    Full pipeline: split -> fit -> predict -> metrics.
+    Full pipeline: fit -> predict -> metrics.
+
+    Two calling conventions
+    -----------------------
+    **A) Separate train / test lists (new):**
+        train_eval(train_examples=train, test_examples=test)
+
+        Use this when training data and test data come from different
+        sources (e.g. pretrain chunks for training, eval data for testing).
+
+    **B) Single list + index split (original):**
+        train_eval(examples, train_indices=..., test_indices=...)
+
+        Splits *examples* by indices.  Four sub-modes:
+        1. Both indices provided  -> use exactly those.
+        2. Only test_indices      -> train = everything else.
+        3. Only train_indices     -> test = everything else.
+        4. Neither                -> random split using n_test & seed.
 
     Parameters
     ----------
-    examples : list[dict]
-        Output of prepare_examples. Each dict must have at least
+    examples : list[dict], optional
+        Single pool of prepared examples (mode B).
+    train_examples, test_examples : list[dict], optional
+        Separate train/test lists (mode A).  Each dict must have
         'history_n', 'future_n', 'future_model', 'mu', 'sigma'.
-        If 'x_model' is present it is used as kernel input;
-        otherwise falls back to 'history_n'.
     train_indices, test_indices : array-like, optional
-        Explicit indices into *examples*.  Four modes:
-
-        1. Both provided  -> use exactly those.
-        2. Only test_indices -> train = everything else.
-        3. Only train_indices -> test = everything else.
-        4. Neither         -> random split using n_test & seed.
+        Only used in mode B.
     n_test : int
-        Only used when no explicit indices are given.
+        Only used in mode B when no explicit indices are given.
     domain : str
         Label for prints / plots.
     gamma : float
@@ -151,45 +165,73 @@ def train_eval(
     -------
     TrainEvalResult
     """
-    n = len(examples)
-    if n == 0:
-        raise ValueError("examples list is empty (all samples may have been filtered out)")
+    # =============================================================
+    # MODE A: separate train / test lists
+    # =============================================================
+    if train_examples is not None and test_examples is not None:
+        train_records = train_examples
+        test_records  = test_examples
+        # synthetic indices for compatibility with TrainEvalResult
+        train_idx = np.arange(len(train_records), dtype=int)
+        test_idx  = np.arange(len(test_records), dtype=int)
+        # combined list for the 'examples' field
+        all_examples = train_records + test_records
 
-    # -- resolve split -----------------------------------------
-    if train_indices is not None and test_indices is not None:
-        train_idx = np.asarray(train_indices, dtype=int)
-        test_idx = np.asarray(test_indices, dtype=int)
-    elif test_indices is not None:
-        test_idx = np.asarray(test_indices, dtype=int)
-        test_set = set(test_idx.tolist())
-        train_idx = np.array([i for i in range(n) if i not in test_set], dtype=int)
-    elif train_indices is not None:
-        train_idx = np.asarray(train_indices, dtype=int)
-        train_set = set(train_idx.tolist())
-        test_idx = np.array([i for i in range(n) if i not in train_set], dtype=int)
+    # =============================================================
+    # MODE B: single list, index split
+    # =============================================================
+    elif examples is not None:
+        n = len(examples)
+        if n == 0:
+            raise ValueError("examples list is empty (all samples may have been filtered out)")
+
+        # -- resolve split -------------------------------------
+        if train_indices is not None and test_indices is not None:
+            train_idx = np.asarray(train_indices, dtype=int)
+            test_idx = np.asarray(test_indices, dtype=int)
+        elif test_indices is not None:
+            test_idx = np.asarray(test_indices, dtype=int)
+            test_set = set(test_idx.tolist())
+            train_idx = np.array([i for i in range(n) if i not in test_set], dtype=int)
+        elif train_indices is not None:
+            train_idx = np.asarray(train_indices, dtype=int)
+            train_set = set(train_idx.tolist())
+            test_idx = np.array([i for i in range(n) if i not in train_set], dtype=int)
+        else:
+            if n <= n_test:
+                raise ValueError(f"Not enough examples ({n}) for n_test={n_test}")
+            rng = np.random.default_rng(seed)
+            perm = rng.permutation(n)
+            test_idx = np.sort(perm[:n_test])
+            train_idx = np.array(
+                [i for i in range(n) if i not in set(test_idx.tolist())], dtype=int
+            )
+
+        # -- validate indices ----------------------------------
+        max_train = int(train_idx.max()) if train_idx.size else -1
+        max_test = int(test_idx.max()) if test_idx.size else -1
+        if max_train >= n or max_test >= n:
+            raise IndexError(
+                f"Index out of range: you have {n} prepared examples "
+                f"but indices go up to {max(max_train, max_test)}. "
+                f"Check len(examples) after prepare_examples — "
+                f"filtering (min_history/min_future) may have removed samples."
+            )
+
+        train_records = [examples[i] for i in train_idx]
+        test_records = [examples[i] for i in test_idx]
+        all_examples = examples
+
     else:
-        if n <= n_test:
-            raise ValueError(f"Not enough examples ({n}) for n_test={n_test}")
-        rng = np.random.default_rng(seed)
-        perm = rng.permutation(n)
-        test_idx = np.sort(perm[:n_test])
-        train_idx = np.array(
-            [i for i in range(n) if i not in set(test_idx.tolist())], dtype=int
+        raise ValueError(
+            "Provide either (train_examples + test_examples) "
+            "or (examples) with optional index arguments."
         )
 
-    # -- validate indices --------------------------------------
-    max_train = int(train_idx.max()) if train_idx.size else -1
-    max_test = int(test_idx.max()) if test_idx.size else -1
-    if max_train >= n or max_test >= n:
-        raise IndexError(
-            f"Index out of range: you have {n} prepared examples "
-            f"but indices go up to {max(max_train, max_test)}. "
-            f"Check len(examples) after prepare_examples — "
-            f"filtering (min_history/min_future) may have removed samples."
-        )
-
-    train_records = [examples[i] for i in train_idx]
-    test_records = [examples[i] for i in test_idx]
+    if len(train_records) == 0:
+        raise ValueError("No training samples")
+    if len(test_records) == 0:
+        raise ValueError("No test samples")
 
     if verbose:
         print(f"[{domain}] split: {len(train_records)} train, {len(test_records)} test")
@@ -245,7 +287,7 @@ def train_eval(
         train_indices=train_idx,
         test_indices=test_idx,
         predictions=predictions,
-        examples=examples,
+        examples=all_examples,
     )
 
     if verbose:
@@ -372,8 +414,10 @@ class ScalingResult:
 
 
 def scaling_study(
-    examples: list[dict],
+    examples: list[dict] | None = None,
     *,
+    train_examples: list[dict] | None = None,
+    test_examples: list[dict] | None = None,
     train_sizes: Sequence[int] | None = None,
     n_sizes: int = 8,
     test_indices: np.ndarray | Sequence[int] | None = None,
@@ -388,51 +432,132 @@ def scaling_study(
     """
     Run train_eval repeatedly with increasing training-set sizes.
 
-    Use this to understand how the amount of training data affects
-    your kernel predictions.
+    Two calling conventions (same as train_eval)
+    ---------------------------------------------
+    **A) Separate pools:**
+        scaling_study(train_examples=train, test_examples=test)
+
+        Subsamples from train_examples at each size, always evaluates
+        on the full test_examples list.
+
+    **B) Single pool + index split:**
+        scaling_study(examples)
+
+        Draws a fixed test set from examples, subsamples training from
+        the remainder.
 
     Parameters
     ----------
-    examples : list[dict]
-        Output of prepare_examples (same as train_eval).
+    examples : list[dict], optional
+        Single pool (mode B).
+    train_examples, test_examples : list[dict], optional
+        Separate pools (mode A).
     train_sizes : list[int], optional
-        Explicit list of training-set sizes to try, e.g. [10, 25, 50, 100].
-        If not given, ``n_sizes`` log-spaced sizes are generated
-        automatically from 5 up to (total - n_test).
+        Explicit sizes to try.  If None, n_sizes log-spaced sizes
+        are generated automatically.
     n_sizes : int
-        Number of sizes to generate when ``train_sizes`` is None.
+        Number of auto-generated sizes (default 8).
     test_indices : array-like, optional
-        Fixed test set (recommended so every size is evaluated on
-        the same samples).  If None, a random test set is drawn once
-        and reused across all sizes.
+        Only used in mode B.
     n_test : int, optional
-        Number of test samples.  Defaults to min(20, len(examples)//5).
-    domain : str
-        Label for prints.
-    gamma : float
-        Tikhonov regularisation.
-    seed : int
-        Random seed.
-    kernel : Kernel, optional
-        Kernel to use (default RBFKernel with median heuristic).
+        Only used in mode B.  Defaults to min(20, len//5).
+    domain, gamma, seed, kernel, verbose : see train_eval.
     max_gram_elements : int
-        Safety cap.  If a requested n_train would produce a Gram matrix
-        larger than this many elements (n_train²), that size is skipped
-        with a warning.  Default 500 000 (≈ 707×707).
-    verbose : bool
-        Show tqdm progress bar and summary lines.
+        Safety cap on Gram matrix size (default 500k).
 
     Returns
     -------
     list[ScalingResult]   (sorted by n_train ascending)
-
-    Example
-    -------
-    >>> results = scaling_study(examples, kernel=DTWKernel(),
-    ...                         train_sizes=[10, 20, 50, 100])
-    >>> for r in results:
-    ...     print(r.n_train, r.mean_relative_rmse, r.mean_mase)
     """
+    # =============================================================
+    # MODE A: separate train / test pools
+    # =============================================================
+    if train_examples is not None and test_examples is not None:
+        max_train = len(train_examples)
+        if max_train == 0:
+            raise ValueError("train_examples is empty")
+        if len(test_examples) == 0:
+            raise ValueError("test_examples is empty")
+
+        # resolve sizes
+        if train_sizes is None:
+            lo = min(5, max_train)
+            sizes = np.unique(
+                np.geomspace(lo, max_train, num=n_sizes).astype(int)
+            ).tolist()
+        else:
+            sizes = sorted(set(int(s) for s in train_sizes))
+
+        # safety filter
+        safe_sizes: list[int] = []
+        for s in sizes:
+            if s > max_train:
+                warnings.warn(
+                    f"Requested n_train={s} but only {max_train} training "
+                    f"samples available — clamping to {max_train}.",
+                    stacklevel=2,
+                )
+                s = max_train
+            if s * s > max_gram_elements:
+                warnings.warn(
+                    f"n_train={s} → {s}×{s} Gram matrix exceeds cap "
+                    f"({max_gram_elements:,}). Skipping.",
+                    stacklevel=2,
+                )
+                continue
+            if s not in safe_sizes:
+                safe_sizes.append(s)
+
+        if not safe_sizes:
+            raise ValueError("All sizes filtered out by safety checks")
+
+        rng_split = np.random.default_rng(seed)
+        results: list[ScalingResult] = []
+
+        iterator = tqdm(safe_sizes, desc=f"scaling {domain or 'study'}",
+                        disable=not verbose)
+        for size in iterator:
+            iterator.set_postfix(n_train=size)
+
+            if size < max_train:
+                chosen = rng_split.choice(max_train, size=size, replace=False)
+                sub_train = [train_examples[i] for i in sorted(chosen)]
+            else:
+                sub_train = train_examples
+
+            res = train_eval(
+                train_examples=sub_train,
+                test_examples=test_examples,
+                domain=f"{domain}[n={size}]" if domain else f"n={size}",
+                gamma=gamma,
+                seed=seed,
+                kernel=kernel,
+                verbose=False,
+            )
+            results.append(ScalingResult(n_train=size, result=res))
+
+            if verbose:
+                tqdm.write(
+                    f"  n_train={size:>5d}  |  "
+                    f"relRMSE={res.mean_relative_rmse:.4f}  "
+                    f"MASE={res.mean_mase:.4f}"
+                )
+
+        if verbose:
+            print(f"\nScaling study done — {len(results)} sizes evaluated, "
+                  f"test set fixed at {len(test_examples)} samples.")
+
+        return results
+
+    # =============================================================
+    # MODE B: single pool, index split
+    # =============================================================
+    if examples is None:
+        raise ValueError(
+            "Provide either (train_examples + test_examples) "
+            "or (examples) with optional index arguments."
+        )
+
     n = len(examples)
     if n == 0:
         raise ValueError("examples list is empty")
@@ -469,7 +594,7 @@ def scaling_study(
         sizes = sorted(set(int(s) for s in train_sizes))
 
     # -- safety warnings ---------------------------------------
-    safe_sizes: list[int] = []
+    safe_sizes = []
     for s in sizes:
         if s > max_train:
             warnings.warn(
@@ -495,7 +620,7 @@ def scaling_study(
 
     # -- run ---------------------------------------------------
     rng_split = np.random.default_rng(seed)
-    results: list[ScalingResult] = []
+    results = []
 
     iterator = tqdm(safe_sizes, desc=f"scaling {domain or 'study'}",
                     disable=not verbose)
