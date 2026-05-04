@@ -297,8 +297,8 @@ class WaveletKernel(Kernel):
             )
         elif self.mode == "coeffs":
             return self._gram_distance(
-                [c["coeffs_real"].ravel() for c in cwts_a],
-                [c["coeffs_real"].ravel() for c in cwts_b],
+                [c["coeffs"].ravel() for c in cwts_a],
+                [c["coeffs"].ravel() for c in cwts_b],
                 n, m, symmetric,
             )
         else:
@@ -319,9 +319,9 @@ class WaveletKernel(Kernel):
         with tqdm(total=total, desc=desc, leave=False) as pbar:
             for i in range(n):
                 j_start = i if symmetric else 0
-                ca = cwts_a[i]["coeffs_real"]       # (n_scales, T)
+                ca = cwts_a[i]["coeffs"]       # (n_scales, T)
                 for j in range(j_start, m):
-                    cb = cwts_b[j]["coeffs_real"]   # (n_scales, T)
+                    cb = cwts_b[j]["coeffs"]   # (n_scales, T)
                     T = min(ca.shape[1], cb.shape[1])
                     if w is not None:
                         val = float(np.sum(w[:, None] * ca[:, :T] * cb[:, :T]))

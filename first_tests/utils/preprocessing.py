@@ -240,6 +240,7 @@ def slice_domain(
 
     all_chunks: list[dict[str, Any]] = []
     failed: list[tuple[str, str]] = []
+    per_subset: list[tuple[str, int, int]] = []  # (name, n_series, n_chunks)
 
     outer = tqdm(subsets, desc=f"domain={domain}", disable=not verbose)
     for subset_name in outer:
@@ -250,6 +251,8 @@ def slice_domain(
             continue
 
         subset_seed = int(rng_master.integers(0, 2**31))
+        raw = None
+        chunks = None
 
         try:
             raw = build_examples(
@@ -258,6 +261,7 @@ def slice_domain(
                 stop=max_series_per_subset,
                 dataset_name=DATASETS["pretrain"],
             )
+            n_series = len(raw)
 
             chunks = slice_pretrain(
                 raw,
@@ -269,32 +273,44 @@ def slice_domain(
                 seed=subset_seed,
                 verbose=False,
             )
+            n_chunks = len(chunks)
             all_chunks.extend(chunks)
+            per_subset.append((subset_name, n_series, n_chunks))
+
             outer.set_postfix(
                 chunks=len(all_chunks),
                 last=subset_name[:20],
             )
+            if verbose:
+                tqdm.write(
+                    f"  ✓  {subset_name}: "
+                    f"{n_series} series → {n_chunks} chunks"
+                )
 
         except Exception as e:
-            msg = str(e).split("\n")[0][:80]
+            msg = str(e).split("\n")[0][:120]
             failed.append((subset_name, msg))
             if verbose:
                 tqdm.write(f"  ✗  {subset_name}: {msg}")
+            continue
 
         finally:
             # free memory immediately
-            try:
-                del raw, chunks
-            except NameError:
-                pass
+            del raw, chunks
             gc.collect()
 
     if verbose:
-        print(f"\nDomain {domain!r}: {len(subsets)} subsets → "
-              f"{len(all_chunks)} chunks "
-              f"({len(failed)} failed)")
+        print(f"\n{'=' * 55}")
+        print(f"Domain {domain!r} summary")
+        print(f"{'=' * 55}")
+        for name, ns, nc in per_subset:
+            print(f"  {name:40s}  {ns:>4d} series → {nc:>5d} chunks")
+        print(f"  {'─' * 53}")
+        total_series = sum(ns for _, ns, _ in per_subset)
+        print(f"  {'TOTAL':40s}  {total_series:>4d} series → {len(all_chunks):>5d} chunks")
         if failed:
+            print(f"\n  Failed ({len(failed)}):")
             for name, err in failed:
-                print(f"  FAILED: {name} — {err}")
+                print(f"    {name}: {err}")
 
     return all_chunks
