@@ -73,7 +73,7 @@ def normalize_by_history(
 
 def resample_series(x: np.ndarray, target_len: int) -> np.ndarray:
     """Linearly resample x to target_len points."""
-    x = np.asarray(x, dtype=np.float16).ravel()
+    x = np.asarray(x, dtype=np.float32).ravel()
     if target_len <= 0:
         raise ValueError("target_len must be positive")
     if x.size == target_len:
