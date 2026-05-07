@@ -425,6 +425,138 @@ def _dtw_distance_matrix(
 
 
 # ═══════════════════════════════════════════════════════════════
+# RECURSIVE FEATURE MACHINE (RFM)
+# ═══════════════════════════════════════════════════════════════
+
+class RFMKernel(Kernel):
+    """
+    Recursive Feature Machine kernel (Radhakrishnan et al., NeurIPS 2022).
+
+    Learns a feature matrix M (d × d) that reweights input dimensions:
+
+        K_M(x, x') = exp( -||Mx - Mx'||² / (2σ²) )
+
+    M is learned iteratively (T rounds):
+        1. Solve kernel regression:  α = (K_M(X,X) + γI)^{-1} y
+        2. Update M from average gradient outer product:
+           M ← (1/n) Σ_i  (∇_x f(x_i)) (∇_x f(x_i))^T
+
+    Parameters
+    ----------
+    T : int
+        Number of RFM iterations.  Default 3.
+    lengthscale : float, optional
+        RBF lengthscale.  Auto-estimated if None.
+    normalize_M : bool
+        Normalize M by its Frobenius norm after each update.
+
+    Example
+    -------
+    >>> kernel = RFMKernel(T=3)
+    >>> result = train_eval(examples, kernel=kernel, ...)
+    """
+
+    def __init__(
+        self,
+        T: int = 3,
+        lengthscale: float | None = None,
+        normalize_M: bool = True,
+    ):
+        self.T = T
+        self.lengthscale = lengthscale
+        self.normalize_M = normalize_M
+        self.M: np.ndarray | None = None
+        self._fitted = False
+
+    def estimate_params(self, X, rng):
+        if self.lengthscale is not None:
+            return
+        X = np.asarray(X, dtype=float)
+        if self.M is not None:
+            Xp = X @ self.M.T
+        else:
+            Xp = X
+        self.lengthscale = median_heuristic_lengthscale(Xp, rng)
+
+    def gram(self, A, B) -> np.ndarray:
+        if self.lengthscale is None:
+            raise ValueError("lengthscale not set")
+        A = np.asarray(A, dtype=float)
+        B = np.asarray(B, dtype=float)
+        if self.M is not None:
+            A = A @ self.M.T
+            B = B @ self.M.T
+        return np.exp(
+            -squared_distance_matrix(A, B) / (2.0 * self.lengthscale ** 2)
+        )
+
+    def fit_rfm(
+        self,
+        X_train,
+        y_train: np.ndarray,
+        gamma: float,
+        rng: np.random.Generator,
+        verbose: bool = True,
+    ):
+        """
+        Run the RFM iterative algorithm.
+
+        Parameters
+        ----------
+        X_train : (n, d) array
+        y_train : (n, output_dim) array
+        gamma : float
+            Tikhonov regularisation.
+        rng : Generator
+        verbose : bool
+        """
+        X = np.asarray(X_train, dtype=float)
+        y = np.asarray(y_train, dtype=float)
+        n, d = X.shape
+
+        self.M = np.eye(d, dtype=float)
+
+        for t in range(self.T):
+            # step 1: estimate lengthscale with current M
+            self.lengthscale = None
+            self.estimate_params(X, rng)
+
+            # step 2: Gram matrix and solve
+            G = self.gram(X, X)
+            alpha = np.linalg.solve(G + gamma * np.eye(n), y)
+
+            # step 3: gradient outer products → new M
+            sigma2 = 2.0 * self.lengthscale ** 2
+            MtM = self.M.T @ self.M
+
+            M_accum = np.zeros((d, d), dtype=float)
+
+            for i in tqdm(range(n), desc=f"RFM iter {t+1}/{self.T}",
+                          leave=False, disable=not verbose):
+                diffs = X - X[i]                            # (n, d)
+                w = np.sum(G[:, i:i+1] * alpha, axis=1)    # (n,)
+                weighted_diff = (w[:, None] * diffs).sum(axis=0)  # (d,)
+                grad_i = MtM @ weighted_diff / sigma2       # (d,)
+                M_accum += np.outer(grad_i, grad_i)
+
+            self.M = M_accum / n
+
+            if self.normalize_M:
+                fnorm = np.linalg.norm(self.M, "fro")
+                if fnorm > 1e-12:
+                    self.M = self.M / fnorm
+
+            if verbose:
+                resid = np.linalg.norm(y - G @ alpha) / max(np.linalg.norm(y), 1e-12)
+                print(f"  RFM iter {t+1}/{self.T}: "
+                      f"residual={resid:.4f}  "
+                      f"||M||_F={np.linalg.norm(self.M, 'fro'):.4f}  "
+                      f"lengthscale={self.lengthscale:.4f}")
+
+        self._fitted = True
+
+
+# ═══════════════════════════════════════════════════════════════
 # CONVOLUTIONAL RECURSIVE FEATURE MACHINE (ConvRFM)
 # ═══════════════════════════════════════════════════════════════
 
@@ -801,8 +933,8 @@ def fit_kernel_operator(
     if kernel is None:
         kernel = RBFKernel()
 
-    # ConvRFM has its own iterative training loop
-    if isinstance(kernel, ConvRFMKernel):
+    # RFM / ConvRFM have their own iterative training loop
+    if isinstance(kernel, (RFMKernel, ConvRFMKernel)):
         kernel.fit_rfm(x_train, y_train, gamma=gamma, rng=rng)
         # after fit_rfm, M is learned — do one final solve with learned M
         G = kernel(x_train, x_train)
