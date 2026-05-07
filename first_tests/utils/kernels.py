@@ -4,6 +4,8 @@ Kernel operator regression utilities — pluggable kernel architecture.
 Kernel classes (subclass Kernel to add your own):
     RBFKernel            — squared-exponential / Gaussian
     LinearKernel         — dot-product
+    WaveletKernel        — CWT-based kernel (inner, energy, or coeffs mode)
+    ConvRFMKernel        — Convolutional Recursive Feature Machine
     DTWKernel            — dynamic time warping distance
 
 Fitting / prediction:
@@ -423,6 +425,275 @@ def _dtw_distance_matrix(
 
 
 # ═══════════════════════════════════════════════════════════════
+# CONVOLUTIONAL RECURSIVE FEATURE MACHINE (ConvRFM)
+# ═══════════════════════════════════════════════════════════════
+
+class ConvRFMKernel(Kernel):
+    """
+    Convolutional Recursive Feature Machine kernel for 1-D time series.
+
+    Learns a feature matrix M (q × q) that weights local patches of
+    size q.  The kernel between two signals is:
+
+        K_M(x, x') = Σ_u  exp( -||M·x[u:u+q] - M·x'[u:u+q]||² / (2σ²) )
+
+    summed over all aligned patch positions u.
+
+    M is learned iteratively (T rounds):
+        1. Solve kernel regression:  α = (K_M(X,X) + γI)^{-1} y
+        2. Update M from the average outer product of patch gradients:
+           M ← (1/n) Σ_x Σ_u  (∇_{x[u]} f(x)) (∇_{x[u]} f(x))^T
+           where f(x) = α · K_M(X, x)
+
+    Parameters
+    ----------
+    q : int
+        Patch size (number of time steps per window).  Default 32.
+    stride : int
+        Stride between patches.  Default 1.  Larger values speed up
+        computation at the cost of resolution.
+    T : int
+        Number of RFM iterations.  Default 3.
+    lengthscale : float, optional
+        RBF lengthscale for patch kernel.  Auto-estimated if None.
+    normalize_M : bool
+        Normalize M by its Frobenius norm after each update.  Default True.
+
+    Notes
+    -----
+    - Call fit_rfm(X_train, y_train, gamma) before using gram().
+      If used with fit_kernel_operator, the fit is triggered automatically.
+    - After fitting, M is fixed and gram() can be called on new data.
+    - For long signals, increase stride to reduce the number of patches.
+
+    Example
+    -------
+    >>> kernel = ConvRFMKernel(q=64, T=5, stride=4)
+    >>> model = fit_kernel_operator(x_train, y_train, gamma=1e-2,
+    ...                             rng=rng, kernel=kernel)
+    """
+
+    def __init__(
+        self,
+        q: int = 32,
+        stride: int = 1,
+        T: int = 3,
+        lengthscale: float | None = None,
+        normalize_M: bool = True,
+    ):
+        self.q = q
+        self.stride = stride
+        self.T = T
+        self.lengthscale = lengthscale
+        self.normalize_M = normalize_M
+        self.M: np.ndarray = np.eye(q, dtype=float)
+        self._fitted = False
+
+    # -- patch extraction ------------------------------------------
+
+    def _extract_patches(self, x: np.ndarray) -> np.ndarray:
+        """Extract (n_patches, q) array of sliding patches from 1-D signal."""
+        x = np.asarray(x, dtype=float).ravel()
+        n_patches = (len(x) - self.q) // self.stride + 1
+        if n_patches <= 0:
+            raise ValueError(
+                f"Signal length {len(x)} too short for patch size q={self.q}"
+            )
+        patches = np.array([
+            x[i * self.stride : i * self.stride + self.q]
+            for i in range(n_patches)
+        ])
+        return patches  # (n_patches, q)
+
+    def _get_signals(self, X):
+        """Convert 2-D array or list to list of 1-D signals."""
+        if isinstance(X, np.ndarray) and X.ndim == 2:
+            return [X[i] for i in range(X.shape[0])]
+        return list(X)
+
+    # -- patch-based Gram matrix -----------------------------------
+
+    def _patch_gram_pair(self, x_i: np.ndarray, x_j: np.ndarray) -> float:
+        """
+        K_M(x_i, x_j) = Σ_u exp(-||M·p_i[u] - M·p_j[u]||² / (2σ²))
+        summed over matching patch positions.
+        """
+        p_i = self._extract_patches(x_i)  # (S, q)
+        p_j = self._extract_patches(x_j)  # (S, q)
+
+        # use the minimum number of patches
+        S = min(len(p_i), len(p_j))
+        p_i, p_j = p_i[:S], p_j[:S]
+
+        # project through M
+        Mp_i = p_i @ self.M.T  # (S, q)
+        Mp_j = p_j @ self.M.T  # (S, q)
+
+        # RBF on each patch pair, then sum
+        diffs = Mp_i - Mp_j                                # (S, q)
+        sq_dists = np.sum(diffs ** 2, axis=1)               # (S,)
+        sigma2 = 2.0 * self.lengthscale ** 2
+        return float(np.sum(np.exp(-sq_dists / sigma2)))
+
+    def gram(self, A, B) -> np.ndarray:
+        if self.lengthscale is None:
+            raise ValueError(
+                "lengthscale not set — call estimate_params or fit_rfm first"
+            )
+        sigs_a = self._get_signals(A)
+        sigs_b = self._get_signals(B)
+        n, m = len(sigs_a), len(sigs_b)
+        symmetric = A is B
+
+        G = np.zeros((n, m))
+        if symmetric:
+            for i in tqdm(range(n), desc="ConvRFM gram (sym)", leave=False):
+                G[i, i] = self._patch_gram_pair(sigs_a[i], sigs_a[i])
+                for j in range(i + 1, n):
+                    val = self._patch_gram_pair(sigs_a[i], sigs_a[j])
+                    G[i, j] = val
+                    G[j, i] = val
+        else:
+            for i in tqdm(range(n), desc="ConvRFM gram", leave=False):
+                for j in range(m):
+                    G[i, j] = self._patch_gram_pair(sigs_a[i], sigs_b[j])
+        return G
+
+    # -- lengthscale estimation ------------------------------------
+
+    def estimate_params(self, X, rng):
+        """Estimate lengthscale from a few projected patch distances."""
+        if self.lengthscale is not None:
+            return
+        sigs = self._get_signals(X)
+        n_probe = min(20, len(sigs))
+        idx = rng.choice(len(sigs), size=n_probe, replace=False)
+
+        # collect projected patch norms for distance estimation
+        all_dists = []
+        for k in range(n_probe):
+            for l in range(k + 1, n_probe):
+                p_k = self._extract_patches(sigs[idx[k]])
+                p_l = self._extract_patches(sigs[idx[l]])
+                S = min(len(p_k), len(p_l))
+                Mp_k = p_k[:S] @ self.M.T
+                Mp_l = p_l[:S] @ self.M.T
+                dists = np.sqrt(np.sum((Mp_k - Mp_l) ** 2, axis=1))
+                all_dists.extend(dists[np.isfinite(dists) & (dists > 0)])
+
+        self.lengthscale = float(np.median(all_dists)) if all_dists else 1.0
+
+    # -- RFM iterative training ------------------------------------
+
+    def fit_rfm(
+        self,
+        X_train,
+        y_train: np.ndarray,
+        gamma: float,
+        rng: np.random.Generator,
+        verbose: bool = True,
+    ):
+        """
+        Run the ConvRFM iterative algorithm.
+
+        After calling this, M is learned and gram() uses it.
+        Also stores alpha and X_train internally so the kernel
+        can be used with fit_kernel_operator seamlessly.
+
+        Parameters
+        ----------
+        X_train : array or list
+            Training signals (same format as gram() input).
+        y_train : (n, d) array
+            Training targets.
+        gamma : float
+            Tikhonov regularisation.
+        rng : Generator
+            Random seed for lengthscale estimation.
+        verbose : bool
+            Print iteration progress.
+        """
+        sigs = self._get_signals(X_train)
+        n = len(sigs)
+        y = np.asarray(y_train, dtype=float)
+        q = self.q
+
+        # reset M to identity
+        self.M = np.eye(q, dtype=float)
+
+        for t in range(self.T):
+            # --- step 1: estimate lengthscale with current M ------
+            self.lengthscale = None  # force re-estimation
+            self.estimate_params(X_train, rng)
+
+            # --- step 2: build Gram matrix and solve --------------
+            G = self.gram(X_train, X_train)
+            alpha = np.linalg.solve(G + gamma * np.eye(n), y)
+
+            # --- step 3: compute patch gradients and update M -----
+            # f(x) = Σ_j α_j K_M(x_j, x)
+            # ∇_{x[u]} f(x) = Σ_j α_j ∇_{x[u]} K_M(x_j, x)
+            #
+            # For patch u:
+            #   ∇_{x[u]} K_M(x_j, x) = k(Mp_j[u], Mp[u]) · M^T (Mp_j[u] - Mp[u]) / σ²
+            #
+            # We accumulate:
+            #   M_new = (1/n) Σ_x Σ_u  grad_u · grad_u^T
+
+            M_accum = np.zeros((q, q), dtype=float)
+            sigma2 = 2.0 * self.lengthscale ** 2
+            total_patches = 0
+
+            for i in tqdm(range(n), desc=f"RFM iter {t+1}/{self.T} grads",
+                          leave=False, disable=not verbose):
+                p_i = self._extract_patches(sigs[i])  # (S_i, q)
+                S_i = len(p_i)
+                Mp_i = p_i @ self.M.T                  # (S_i, q)
+
+                for u in range(S_i):
+                    # gradient of f(x_i) w.r.t. patch u
+                    # sum over all training points j
+                    grad_u = np.zeros(q, dtype=float)
+
+                    for j in range(n):
+                        p_j = self._extract_patches(sigs[j])
+                        S_j = len(p_j)
+                        if u >= S_j:
+                            continue
+                        Mp_j_u = p_j[u] @ self.M.T          # (q,)
+                        diff = Mp_j_u - Mp_i[u]              # (q,)
+                        sq_dist = float(np.sum(diff ** 2))
+                        k_val = np.exp(-sq_dist / sigma2)
+
+                        # α is (n, d) — sum gradient contribution over output dims
+                        # ∇ is (q,) — direction in M-projected space
+                        alpha_weight = float(np.sum(alpha[j]))
+                        grad_u += alpha_weight * k_val * (self.M.T @ diff)
+
+                    M_accum += np.outer(grad_u, grad_u)
+                    total_patches += 1
+
+            # average and update M
+            if total_patches > 0:
+                self.M = M_accum / total_patches
+
+            if self.normalize_M:
+                fnorm = np.linalg.norm(self.M, "fro")
+                if fnorm > 1e-12:
+                    self.M = self.M / fnorm
+
+            if verbose:
+                # re-evaluate with new M
+                resid = np.linalg.norm(y - G @ alpha) / max(np.linalg.norm(y), 1e-12)
+                print(f"  RFM iter {t+1}/{self.T}: "
+                      f"residual={resid:.4f}  "
+                      f"||M||_F={np.linalg.norm(self.M, 'fro'):.4f}  "
+                      f"lengthscale={self.lengthscale:.4f}")
+
+        self._fitted = True
+
+
+# ═══════════════════════════════════════════════════════════════
 # DTW KERNEL
 # ═══════════════════════════════════════════════════════════════
 
@@ -529,6 +800,21 @@ def fit_kernel_operator(
     """
     if kernel is None:
         kernel = RBFKernel()
+
+    # ConvRFM has its own iterative training loop
+    if isinstance(kernel, ConvRFMKernel):
+        kernel.fit_rfm(x_train, y_train, gamma=gamma, rng=rng)
+        # after fit_rfm, M is learned — do one final solve with learned M
+        G = kernel(x_train, x_train)
+        alpha = np.linalg.solve(G + gamma * np.eye(G.shape[0]), y_train)
+        return {
+            "x_train": x_train,
+            "alpha": alpha,
+            "kernel": kernel,
+            "gamma": gamma,
+            "lengthscale": kernel.lengthscale,
+            "M": kernel.M,
+        }
 
     kernel.estimate_params(x_train, rng)
 
