@@ -34,7 +34,7 @@ from utils.config import DEFAULT_CONFIG, DATASETS
 
 def clean_series(x: np.ndarray) -> np.ndarray:
     """Interpolate NaN / Inf values in a 1-D series."""
-    x = np.asarray(x, dtype=np.float16).ravel().copy()
+    x = np.asarray(x, dtype=np.float32).ravel().copy()
     if x.size == 0:
         return x
     finite = np.isfinite(x)
