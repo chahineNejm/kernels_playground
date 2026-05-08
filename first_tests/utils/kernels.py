@@ -5,6 +5,7 @@ Kernel classes (subclass Kernel to add your own):
     RBFKernel            — squared-exponential / Gaussian
     LinearKernel         — dot-product
     WaveletKernel        — CWT-based kernel (inner, energy, or coeffs mode)
+    NTKKernel            — Neural Tangent Kernel (analytical, infinite-width MLP)
     RFMKernel            — Recursive Feature Machine (learned M reweights inputs)
     ConvRFMKernel        — Convolutional Recursive Feature Machine (patches)
     DTWKernel            — dynamic time warping distance
@@ -389,6 +390,153 @@ def _dtw_distance_matrix(
                     D[i, j] = _dtw_cost(A[i], B[j], window=window)
                     pbar.update(1)
     return D
+
+
+# ═══════════════════════════════════════════════════════════════
+# NEURAL TANGENT KERNEL (analytical, infinite-width MLP)
+# ═══════════════════════════════════════════════════════════════
+
+class NTKKernel(Kernel):
+    """
+    Neural Tangent Kernel for a fully-connected ReLU network.
+
+    Computes the exact infinite-width NTK via the closed-form
+    recursive formula (Jacot et al., NeurIPS 2018).  No neural
+    network is instantiated — this is a pure kernel method.
+
+    The kernel corresponds to training an infinitely wide MLP:
+
+        f(x) = W_L · σ(W_{L-1} · σ(… σ(W_1 · x + b_1) …) + b_{L-1}) + b_L
+
+    with L = depth hidden layers, each using ReLU activation σ.
+
+    The NTK is built recursively, layer by layer:
+
+        1. Σ⁰ = σ_w² (X·X') / d + σ_b²           (input covariance)
+        2. For each hidden layer l:
+             ρ   = Σ^{l-1}_ab / √(Σ^{l-1}_aa · Σ^{l-1}_bb)
+             κ₁  = √(Σ_aa·Σ_bb)/(2π) · (√(1-ρ²) + (π-arccos ρ)·ρ)
+             κ₀  = (π - arccos ρ) / (2π)
+             Σ^l = σ_w² · κ₁ + σ_b²
+             Σ̇^l = σ_w² · κ₀
+             Θ^l = Σ^l + Σ̇^l · Θ^{l-1}
+
+    Parameters
+    ----------
+    depth : int
+        Number of hidden layers (each with ReLU).
+    sigma_w : float
+        Weight standard deviation per layer.
+        Default √2 (He initialisation, keeps variance stable through
+        ReLU layers).
+    sigma_b : float
+        Bias standard deviation per layer.  Default 0.
+    normalize : bool
+        If True, normalise the final NTK to a correlation matrix:
+        K_ij → K_ij / √(K_ii · K_jj).
+        Keeps kernel values in [−1, 1] and improves conditioning of
+        the Gram matrix.  Recommended unless you want raw NTK values.
+
+    Example
+    -------
+    >>> kernel = NTKKernel(depth=3)
+    >>> result = train_eval(examples, kernel=kernel)
+    """
+
+    def __init__(
+        self,
+        depth: int = 3,
+        sigma_w: float = None,
+        sigma_b: float = 0.0,
+        normalize: bool = True,
+    ):
+        self.depth = depth
+        self.sigma_w = np.sqrt(2.0) if sigma_w is None else sigma_w
+        self.sigma_b = sigma_b
+        self.normalize = normalize
+
+    # -- ReLU dual activation functions ----------------------------
+
+    @staticmethod
+    def _kappa1(rho: np.ndarray, s_aa: np.ndarray, s_bb: np.ndarray) -> np.ndarray:
+        """E[ReLU(u) · ReLU(v)] where (u,v) ~ N(0, Λ) and ρ = Λ_ab / √(Λ_aa · Λ_bb)."""
+        rho = np.clip(rho, -1.0, 1.0)
+        angle = np.arccos(rho)
+        sin_angle = np.sqrt(np.maximum(1.0 - rho ** 2, 0.0))
+        magnitude = np.sqrt(np.maximum(s_aa * s_bb, 0.0))
+        return magnitude / (2.0 * np.pi) * (sin_angle + (np.pi - angle) * rho)
+
+    @staticmethod
+    def _kappa0(rho: np.ndarray) -> np.ndarray:
+        """E[ReLU'(u) · ReLU'(v)] = (π − arccos ρ) / 2π."""
+        rho = np.clip(rho, -1.0, 1.0)
+        return (np.pi - np.arccos(rho)) / (2.0 * np.pi)
+
+    # -- diagonal helper (needed for cross-gram normalisation) -----
+
+    def _ntk_diag(self, X: np.ndarray) -> np.ndarray:
+        """Compute NTK diagonal entries Θ(x_i, x_i) for all rows of X."""
+        sw2 = self.sigma_w ** 2
+        sb2 = self.sigma_b ** 2
+        d = X.shape[1]
+
+        s_ii = sw2 * np.sum(X ** 2, axis=1) / d + sb2   # (n,)
+        theta_ii = s_ii.copy()
+
+        for _ in range(self.depth):
+            # at ρ = 1:  κ₀ = 0.5,  κ₁(s,s) = s/2
+            s_dot = sw2 * 0.5
+            s_ii = sw2 * s_ii / 2.0 + sb2
+            theta_ii = s_ii + s_dot * theta_ii
+
+        return theta_ii
+
+    # -- Gram matrix -----------------------------------------------
+
+    def gram(self, A, B) -> np.ndarray:
+        A = np.asarray(A, dtype=float)
+        B = np.asarray(B, dtype=float)
+
+        sw2 = self.sigma_w ** 2
+        sb2 = self.sigma_b ** 2
+        d = A.shape[1]
+
+        # Layer 0: input covariance
+        S_ab = sw2 * (A @ B.T) / d + sb2
+        S_aa = sw2 * np.sum(A ** 2, axis=1, keepdims=True) / d + sb2   # (n, 1)
+        S_bb = sw2 * np.sum(B ** 2, axis=1, keepdims=True).T / d + sb2 # (1, m)
+
+        # Θ starts as the layer-0 covariance
+        Theta = S_ab.copy()
+
+        # Hidden layers with ReLU
+        for _ in range(self.depth):
+            denom = np.sqrt(np.maximum(S_aa * S_bb, 1e-24))
+            rho = S_ab / denom
+
+            S_dot = sw2 * self._kappa0(rho)
+
+            S_ab = sw2 * self._kappa1(rho, S_aa, S_bb) + sb2
+            S_aa = sw2 * S_aa / 2.0 + sb2    # κ₁ at ρ=1 → S_aa/2
+            S_bb = sw2 * S_bb / 2.0 + sb2
+
+            Theta = S_ab + S_dot * Theta
+
+        # -- optional normalisation --------------------------------
+        if self.normalize:
+            if A is B:
+                diag = np.diag(Theta)
+                diag = np.maximum(diag, 1e-12)
+                Theta = Theta / np.sqrt(np.outer(diag, diag))
+            else:
+                diag_a = self._ntk_diag(A)
+                diag_b = self._ntk_diag(B)
+                Theta = Theta / np.sqrt(
+                    np.maximum(diag_a[:, None], 1e-12)
+                    * np.maximum(diag_b[None, :], 1e-12)
+                )
+
+        return Theta
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -952,7 +1100,7 @@ def mase(y_true: np.ndarray, y_pred: np.ndarray, y_history: np.ndarray) -> float
 
     MASE = MAE(forecast) / MAE(naive one-step forecast on history).
 
-    The naive baseline is the random-walk forecast: ŷ_t = y_{t-1},
+    The naive baseline is the random-walk forecast: \u0177_t = y_{t-1},
     so its MAE is the mean of |y_t - y_{t-1}| over the history.
 
     Parameters
