@@ -5,7 +5,8 @@ Kernel classes (subclass Kernel to add your own):
     RBFKernel            — squared-exponential / Gaussian
     LinearKernel         — dot-product
     WaveletKernel        — CWT-based kernel (inner, energy, or coeffs mode)
-    ConvRFMKernel        — Convolutional Recursive Feature Machine
+    RFMKernel            — Recursive Feature Machine (learned M reweights inputs)
+    ConvRFMKernel        — Convolutional Recursive Feature Machine (patches)
     DTWKernel            — dynamic time warping distance
 
 Fitting / prediction:
@@ -207,46 +208,12 @@ class WaveletKernel(Kernel):
         self.wavelet = wavelet
         self.scale_weights = scale_weights
         self.top_k = top_k
-        self._cwt_cache: dict[int, dict] = {}
-
-    def _cwt(self, x: np.ndarray) -> dict:
-        """CWT with caching by object id."""
-        xid = id(x)
-        if xid not in self._cwt_cache:
-            from utils.decomposition import cwt_decompose
-            self._cwt_cache[xid] = cwt_decompose(
-                x,
-                wavelet=self.wavelet,
-                n_scales=self.n_scales,
-                scale_min=self.scale_min,
-                scale_max=self.scale_max,
-                top_k=self.top_k,
-                quiet="full",
-            )
-        return self._cwt_cache[xid]
 
     def _get_signals(self, X):
         """Extract individual signals from array or list."""
         if isinstance(X, np.ndarray) and X.ndim == 2:
             return [X[i] for i in range(X.shape[0])]
         return list(X)
-
-    def _compute_representations(self, signals):
-        """Compute CWT representations for a list of signals."""
-        from tqdm.auto import tqdm as _tqdm
-
-        reps = []
-        for s in _tqdm(signals, desc="WaveletKernel CWT", leave=False):
-            cwt_result = cwt_decompose_cached(
-                s,
-                wavelet=self.wavelet,
-                n_scales=self.n_scales,
-                scale_min=self.scale_min,
-                scale_max=self.scale_max,
-                top_k=self.top_k,
-            )
-            reps.append(cwt_result)
-        return reps
 
     def gram(self, A, B) -> np.ndarray:
         from utils.decomposition import cwt_decompose
@@ -776,31 +743,27 @@ class ConvRFMKernel(Kernel):
             sigma2 = 2.0 * self.lengthscale ** 2
             total_patches = 0
 
+            # pre-compute patches and projections once per iteration
+            all_patches = [self._extract_patches(sigs[i]) for i in range(n)]
+            all_Mp = [all_patches[i] @ self.M.T for i in range(n)]
+            # pre-sum alpha over output dims: scalar weight per training point
+            alpha_weights = np.sum(alpha, axis=1)  # (n,)
+
             for i in tqdm(range(n), desc=f"RFM iter {t+1}/{self.T} grads",
                           leave=False, disable=not verbose):
-                p_i = self._extract_patches(sigs[i])  # (S_i, q)
-                S_i = len(p_i)
-                Mp_i = p_i @ self.M.T                  # (S_i, q)
+                S_i = len(all_patches[i])
+                Mp_i = all_Mp[i]                          # (S_i, q)
 
                 for u in range(S_i):
-                    # gradient of f(x_i) w.r.t. patch u
-                    # sum over all training points j
                     grad_u = np.zeros(q, dtype=float)
 
                     for j in range(n):
-                        p_j = self._extract_patches(sigs[j])
-                        S_j = len(p_j)
-                        if u >= S_j:
+                        if u >= len(all_patches[j]):
                             continue
-                        Mp_j_u = p_j[u] @ self.M.T          # (q,)
-                        diff = Mp_j_u - Mp_i[u]              # (q,)
+                        diff = all_Mp[j][u] - Mp_i[u]         # (q,)
                         sq_dist = float(np.sum(diff ** 2))
                         k_val = np.exp(-sq_dist / sigma2)
-
-                        # α is (n, d) — sum gradient contribution over output dims
-                        # ∇ is (q,) — direction in M-projected space
-                        alpha_weight = float(np.sum(alpha[j]))
-                        grad_u += alpha_weight * k_val * (self.M.T @ diff)
+                        grad_u += alpha_weights[j] * k_val * (self.M.T @ diff)
 
                     M_accum += np.outer(grad_u, grad_u)
                     total_patches += 1

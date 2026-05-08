@@ -16,7 +16,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from utils.config import DEFAULT_CONFIG
-from utils.data import build_examples, resolve_config
+from utils.data import build_examples, prepare_examples, resolve_config
 from utils.kernels import (
     Kernel,
     fit_kernel_operator,
@@ -306,6 +306,10 @@ def run_all_domains(
     start: int = 0,
     stop: int | None = None,
     step: int = 1,
+    history_len: int | None = None,
+    future_len: int | None = None,
+    min_history: int | None = None,
+    min_future: int | None = None,
     train_indices: np.ndarray | Sequence[int] | None = None,
     test_indices: np.ndarray | Sequence[int] | None = None,
     n_test: int = DEFAULT_CONFIG["N_TEST_SAMPLES"],
@@ -325,6 +329,10 @@ def run_all_domains(
         Defaults to DEFAULT_CONFIG["CONFIGS"].
     start, stop, step : int
         Passed to build_examples for each domain.
+    history_len, future_len : int, optional
+        Target lengths for prepare_examples. None = use median.
+    min_history, min_future : int, optional
+        Drop samples shorter than these before resampling.
     train_indices, test_indices : array-like, optional
         Explicit indices (applied identically to every domain).
         See train_eval for the split modes.
@@ -341,12 +349,19 @@ def run_all_domains(
         if verbose:
             print(f"\n{'=' * 60}")
         try:
-            examples = build_examples(
+            raw = build_examples(
                 config=config,
                 start=start,
                 stop=stop,
                 step=step,
                 dataset_name=dataset_name,
+            )
+            examples = prepare_examples(
+                raw,
+                history_len=history_len,
+                future_len=future_len,
+                min_history=min_history,
+                min_future=min_future,
             )
             result = train_eval(
                 examples,

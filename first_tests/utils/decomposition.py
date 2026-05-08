@@ -478,7 +478,7 @@ def decompose_series(
 # ═══════════════════════════════════════════════════════════════
 
 def make_decomposition_feature_fn(
-    method: Literal["emd", "kmd"] = "emd",
+    method: Literal["emd", "kmd", "cwt"] = "emd",
     max_modes: int | None = None,
     include_original: bool = True,
     target_len: int | None = None,

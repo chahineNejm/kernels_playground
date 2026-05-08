@@ -2,6 +2,7 @@ numpy
 scipy
 matplotlib
 datasets
+huggingface_hub
 tqdm
 zombie-imp
 # -- optional: decomposition ---------------------------------

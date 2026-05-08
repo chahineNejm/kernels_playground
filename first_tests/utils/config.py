@@ -344,7 +344,7 @@ DEFAULT_CONFIG = {
     "PRETRAIN_BY_DOMAIN": PRETRAIN_BY_DOMAIN,   # domain → list of subsets
 
     # -- sampling ----------------------------------------------
-    "N_SAMPLES_TO_LOAD": 10.000,
+    "N_SAMPLES_TO_LOAD": 10_000,
     "N_TEST_SAMPLES": 200,
     "RANDOM_SEED": 0,
 

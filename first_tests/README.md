@@ -303,7 +303,7 @@ Signal decomposition methods for building richer features from time series.
 
 **`kmd_decompose(signal, alpha, wave_p, thr, thr_en, ref_fin, t_mesh, quiet)`** — Kernel Mode Decomposition via the external KMD_lib. Patches `builtins.input` to run non-interactively (auto-assigns fragment N to mode N). The `quiet` parameter controls stdout: `True` (default) shows a tqdm bar + summaries, `"full"` suppresses everything, `False` shows all output. Returns dict with `modes`, `amplitudes`, `phases`, `frequencies`.
 
-**`cwt_decompose(signal, wavelet, scales, n_scales, scale_min, scale_max, scale_spacing, top_k, quiet)`** — Continuous Wavelet Transform. Supports `"morlet"` and `"ricker"` wavelets (falls back to PyWavelets if installed). Returns dict with `modes`, `coeffs` (complex), `coeffs_real`, `coeffs_imag`, `amplitudes`, `phases`, `scales`, `energies`, `frequencies`.
+**`cwt_decompose(signal, wavelet, scales, n_scales, scale_min, scale_max, scale_spacing, top_k, quiet)`** — Continuous Wavelet Transform. Supports `"morlet"` and `"ricker"` wavelets (falls back to PyWavelets if installed). Returns dict with `modes` (reconstructed per-scale signals), `coeffs` (real CWT coefficients), `scales`, `energies` (energy per scale), `frequencies` (pseudo-frequencies, 1/scale).
 
 **Unified interface:**
 
