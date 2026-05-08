@@ -16,6 +16,7 @@ first_tests/
 │   ├── data.py              # data loading, cleaning, normalisation
 │   ├── kernels.py           # kernel classes + fit/predict + metrics
 │   ├── decomposition.py     # EMD, KMD, CWT signal decomposition
+│   ├── preprocessing.py     # slicing pretrain series into training chunks
 │   ├── pipeline.py          # train_eval, run_all_domains, scaling_study
 │   └── viz.py               # plotting and diagnostic dashboards
 ├── jonghyeon.py             # advanced kernel utilities (tau-localisation, mama/baby kernels)
@@ -43,9 +44,57 @@ git clone https://github.com/kernel-enthusiasts/Kernel-Mode-Decomposition-1D
 
 The framework supports two HuggingFace datasets from the GIFT-Eval benchmark:
 
-**Eval** ([Salesforce/GiftEvalParquet](https://huggingface.co/datasets/Salesforce/GiftEvalParquet)) — 97 configs across 23 datasets, 7 domains, 10 frequencies. Each sample has pre-split `history_value` and `future_value` fields for standardised evaluation.
+**Eval** ([Salesforce/GiftEvalParquet](https://huggingface.co/datasets/Salesforce/GiftEvalParquet)) — 97 configs across 23 base datasets, 7 domains, 10 frequencies, ~144,000 time series and ~177 million data points. Each sample has pre-split `history_value` and `future_value` fields.
 
-**Pretrain** ([Salesforce/GiftEvalPretrain](https://huggingface.co/datasets/Salesforce/GiftEvalPretrain)) — 143 subsets spanning the same 7 domains. Each sample has a single `target` field with the full series (no pre-defined history/future split). Subsets are loaded individually to avoid downloading the entire dataset.
+**Pretrain** ([Salesforce/GiftEvalPretrain](https://huggingface.co/datasets/Salesforce/GiftEvalPretrain)) — 143 subsets, 7 domains, ~4.5 million time series and ~230 billion data points. Each sample has a single `target` field (no history/future split).
+
+### Eval configs (97 total)
+
+Each config is a combination of base dataset, frequency, and forecast term (short/medium/long).
+
+| Base dataset | Domain | Frequencies | Terms | Configs |
+|---|---|---|---|---|
+| electricity | Energy | 15T, H, D, W | short/medium/long | 8 |
+| ett1 | Energy | 15T, H, D, W | short/medium/long | 8 |
+| ett2 | Energy | 15T, H, D, W | short/medium/long | 8 |
+| solar | Energy | 10T, H, D, W | short/medium/long | 8 |
+| loop_seattle | Transport | 5T, H, D | short/medium/long | 7 |
+| sz_taxi | Transport | 15T, H | short/medium/long | 4 |
+| bitbrains_fast_storage | Web/CloudOps | 5T, H | short/medium/long | 4 |
+| bitbrains_rnd | Web/CloudOps | 5T, H | short/medium/long | 4 |
+| bizitobs_application | Web/CloudOps | 10S | short/medium/long | 3 |
+| bizitobs_l2c | Web/CloudOps | 5T, H | short/medium/long | 6 |
+| bizitobs_service | Web/CloudOps | 10S | short/medium/long | 3 |
+| jena_weather | Nature | 10T, H, D | short/medium/long | 7 |
+| kdd_cup_2018 | Nature | H, D | short/medium/long | 4 |
+| saugeen | Nature | D, W, M | short | 3 |
+| temperature_rain | Nature | D | short | 1 |
+| us_births | Nature | D, W, M | short | 3 |
+| car_parts | Sales | M | short | 1 |
+| hierarchical_sales | Sales | D, W | short | 2 |
+| restaurant | Sales | D | short | 1 |
+| covid_deaths | Healthcare | D | short | 1 |
+| hospital | Healthcare | M | short | 1 |
+| m4 | Econ/Finance | H, D, W, M, Q, A | short | 6 |
+| m_dense | Econ/Finance | D, H | short/medium/long | 4 |
+
+Config naming convention: `{dataset}_{freq}_{term}` (e.g. `electricity_H_long`).
+
+### Pretrain subsets (143 total)
+
+| Domain | Subsets | Examples |
+|---|---|---|
+| Transport (18) | BEIJING_SUBWAY_30MIN, HZMETRO, LOS_LOOP, PEMS03–08, PEMS_BAY, Q-TRAFFIC, SHMETRO, pedestrian_counts, rideshare_with_missing, taxi_30min, traffic_hourly, traffic_weekly, uber_tlc_daily, uber_tlc_hourly, vehicle_trips_with_missing | |
+| Web/CloudOps (7) | alibaba_cluster_trace_2018, azure_vm_traces_2017, borg_cluster_data_2011, godaddy, extended_web_traffic_with_missing, kaggle_web_traffic_weekly, wiki-rolling_nips | |
+| Energy (19) | australian_electricity_demand, covid19_energy, elecdemand, elf, gfc12_load, gfc14_load, gfc17_load, largest_2017–2021, lcl, london_smart_meters_with_missing, residential_load_power, residential_pv_power, solar_power, wind_farms_with_missing, wind_power | |
+| Buildings (5) | bdg-2_bear, bdg-2_fox, bdg-2_panther, bdg-2_rat, buildings_900k | |
+| Nature/Weather (9) | beijing_air_quality, borealis, china_air_quality, oikolab_weather, sceaux, smart, subseasonal, subseasonal_precip, sunspot_with_missing | |
+| Climate (63) | cmip6_1850–2010 (33 subsets), era5_1989–2018 (30 subsets) | |
+| Healthcare (4) | cdc_fluview_ilinet, cdc_fluview_who_nrevss, covid_mobility, project_tycho | |
+| Sales (4) | cockatoo, favorita_sales, favorita_transactions, m5 | |
+| Econ/Finance (5) | bitcoin_with_missing, bull, fred_md, hog, ideal | |
+| Benchmarks (14) | m1_monthly/quarterly/yearly, monash_m3_monthly/other/quarterly/yearly, cif_2016_6/12, nn5_daily_with_missing, nn5_weekly, tourism_monthly/quarterly/yearly | |
+| Other (4) | kdd2022, pdb, spain, temperature_rain_D_short | |
 
 ### Switching between datasets
 
@@ -172,6 +221,30 @@ Handles everything from loading HuggingFace datasets to producing normalised, un
 
 ---
 
+### `utils/preprocessing.py`
+
+Utilities for slicing long pretrain series into history/future training chunks. Pretrain samples are single long time series (the `target` field), so they need to be chopped into history→future pairs before they can be used with the kernel pipeline.
+
+**`slice_series(series, future_len, min_history, max_history, min_future, max_future, seed, start_idx)`** — chops a single long 1-D series into non-overlapping chunks. Each chunk gets a random history length (between `min_history` and `max_history`), followed by a fixed-length future window. Returns a list of dicts with `sample_idx` (plain integer), `history`, and `future`. Series shorter than `min_history + min_future` are skipped.
+
+**`slice_pretrain(examples, future_len, min_history, max_history, min_future, max_future, seed, verbose)`** — applies `slice_series` to every example in a list (output of `build_examples` on a pretrain subset). Assigns globally sequential integer `sample_idx` values (0, 1, 2, ...) across all series. Prints a summary with total chunks and how many series were too short.
+
+**`slice_domain(domain, future_len, min_history, max_history, min_future, max_future, max_series_per_subset, skip_prefixes, seed, verbose)`** — loads and slices every pretrain subset in a domain (e.g. "Energy", "Transport"), one subset at a time. Each subset is downloaded, sliced, and freed before moving to the next, so peak memory is only one subset at a time. Prints a per-subset summary table showing series count and chunk count. Supports `skip_prefixes` to skip unwanted subsets (e.g. `("largest",)`) and `max_series_per_subset` to cap huge subsets.
+
+```python
+from utils.preprocessing import slice_domain
+from utils.data import prepare_examples
+
+# slice all Energy pretrain subsets into training chunks
+chunks = slice_domain("Energy", future_len=700,
+                      skip_prefixes=("largest",))
+
+# then prepare for the kernel pipeline
+examples = prepare_examples(chunks, history_len=3000, future_len=700)
+```
+
+---
+
 ### `utils/kernels.py`
 
 Pluggable kernel architecture built on an ABC base class, plus fitting/prediction functions and metrics.
@@ -202,6 +275,12 @@ Subclass `Kernel`, implement `gram()`, and you have a new kernel method.
 - `"coeffs"` — RBF on flattened CWT coefficient matrices (most expressive, most expensive)
 
 All modes compute CWT internally using the decomposition module.
+
+**`RFMKernel(T=3, lengthscale=None, normalize_M=True)`** — Recursive Feature Machine kernel. Learns a feature-reweighting matrix M (d×d) that emphasises the most predictive input dimensions. The kernel is K_M(x, x') = exp(-‖Mx - Mx'‖² / 2σ²). M is learned iteratively over T rounds: solve the kernel regression, compute gradient outer products from the solution, and update M. The matrix is plain d×d (no low-rank approximation). Call `fit_rfm(X_train, y_train, gamma, rng)` before using as a kernel — this is handled automatically by `fit_kernel_operator`.
+
+**`ConvRFMKernel(q=32, stride=1, T=3, lengthscale=None, normalize_M=True)`** — Convolutional Recursive Feature Machine. Same iterative M-learning as RFMKernel, but applied to sliding patches of size q instead of the full input vector. The kernel sums over aligned patch positions: K_M(x, x') = Σ_u exp(-‖M · x[u:u+q] - M · x'[u:u+q]‖² / 2σ²). M is q×q, so memory is independent of input length. Particularly suited for long time series where local patterns matter more than global shape.
+
+Both RFM kernels are detected automatically by `fit_kernel_operator`, which calls their `fit_rfm` method before building the Gram matrix.
 
 #### Fit and predict
 
@@ -239,14 +318,25 @@ End-to-end training and evaluation workflows.
 
 #### `train_eval`
 
-Single-domain pipeline: split → fit → predict → metrics. Accepts `examples` (from `prepare_examples`), an optional `kernel`, and supports four split modes:
+Single-domain pipeline: split → fit → predict → metrics. Supports two modes:
 
-1. Both `train_indices` and `test_indices` provided → use exactly those.
-2. Only `test_indices` → train = everything else.
-3. Only `train_indices` → test = everything else.
-4. Neither → random split using `n_test` and `seed`.
+**Mode A — separate train/test lists** (for training on pretrain, testing on eval):
 
-Returns a `TrainEvalResult` dataclass with the model, predictions, and aggregate metrics (`mean_rmse`, `mean_relative_rmse`, `median_relative_rmse`, `mean_mase`, `median_mase`). The `summary()` method produces a flat dict suitable for building a DataFrame.
+```python
+result = train_eval(train_examples=train, test_examples=test, kernel=RBFKernel())
+```
+
+No index splitting — each list is used as-is.
+
+**Mode B — single pool with index split** (original mode):
+
+```python
+result = train_eval(examples, n_test=20, kernel=RBFKernel())
+```
+
+Supports four split sub-modes: both `train_indices` and `test_indices` provided, only one of them (the other is inferred), or neither (random split using `n_test` and `seed`).
+
+Both modes are backward compatible. Returns a `TrainEvalResult` dataclass with the model, predictions, and aggregate metrics (`mean_rmse`, `mean_relative_rmse`, `median_relative_rmse`, `mean_mase`, `median_mase`). The `summary()` method produces a flat dict suitable for building a DataFrame.
 
 #### `run_all_domains`
 
@@ -254,17 +344,21 @@ Loops `train_eval` over every domain in `DEFAULT_CONFIG["CONFIGS"]` (or a custom
 
 #### `scaling_study`
 
-Evaluates how training-set size affects prediction quality. Fixes the test set once, then runs `train_eval` at each requested size by subsampling from the training pool.
+Evaluates how training-set size affects prediction quality. Also supports two modes matching `train_eval`:
+
+**Mode A — separate train/test:**
 
 ```python
-from utils.pipeline import scaling_study
+results = scaling_study(train_examples=train, test_examples=test, kernel=RBFKernel())
+```
 
-# auto-generate 8 log-spaced sizes
+Subsamples from `train_examples` at each size, always evaluates on the full `test_examples`.
+
+**Mode B — single pool:**
+
+```python
 results = scaling_study(examples, kernel=RBFKernel(), domain="Energy")
-
-# or specify exactly
-results = scaling_study(examples, train_sizes=[10, 25, 50, 100, 200],
-                        kernel=DTWKernel())
+results = scaling_study(examples, train_sizes=[10, 25, 50, 100, 200], kernel=DTWKernel())
 ```
 
 - `train_sizes` — explicit list of sizes. If None, generates `n_sizes` (default 8) log-spaced values from 5 to max available.
@@ -402,3 +496,65 @@ plt.ylabel("metric")
 plt.legend()
 plt.show()
 ```
+
+---
+
+## Pretrain → Eval workflow
+
+Train on pretrain data and evaluate on eval data. The key constraint is frequency matching — training data must share the same sampling frequency as the eval target.
+
+### Step 1: Slice pretrain data into training chunks
+
+```python
+from utils.preprocessing import slice_domain
+from utils.data import prepare_examples
+
+# slice all Energy pretrain subsets
+chunks = slice_domain("Energy", future_len=200,
+                      max_series_per_subset=500,
+                      skip_prefixes=("largest",))
+# chunks is a flat list of dicts with sample_idx, history, future
+```
+
+### Step 2: Load eval data for testing
+
+```python
+from utils.data import build_examples
+
+eval_raw = build_examples(config="electricity_H_long", start=0, stop=100)
+```
+
+### Step 3: Prepare both with matching target lengths
+
+```python
+train = prepare_examples(chunks, history_len=500, future_len=200)
+test  = prepare_examples(eval_raw, history_len=500, future_len=200)
+```
+
+### Step 4: Train on pretrain, evaluate on eval
+
+```python
+from utils.kernels import RBFKernel
+from utils.pipeline import train_eval
+
+result = train_eval(train_examples=train, test_examples=test,
+                    kernel=RBFKernel())
+```
+
+### Frequency-matched training
+
+Pretrain samples carry a `freq` metadata field. Use `extra_keys` to extract it, then filter to match your eval target frequency:
+
+```python
+from utils.data import build_examples
+from utils.config import DATASETS
+
+raw = build_examples("solar_power", start=0, stop=500,
+                     dataset_name=DATASETS["pretrain"],
+                     extra_keys=["freq"])
+
+# filter to hourly series only
+hourly = [ex for ex in raw if ex.get("freq") == "H"]
+```
+
+This ensures the training data's temporal resolution matches the eval dataset, avoiding artefacts from resampling across different frequencies.
