@@ -16,7 +16,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from utils.config import DEFAULT_CONFIG
-from utils.data import build_examples, prepare_examples, resolve_config
+from utils.data import build_examples, prepare_examples, resolve_config, resample_series
 from utils.kernels import (
     Kernel,
     fit_kernel_operator,
@@ -268,13 +268,22 @@ def train_eval(
 
     predictions: list[dict[str, Any]] = []
     for i, rec in enumerate(test_records):
-        y_pred = rec["mu"] + rec["sigma"] * y_pred_all_n[i]
+        # un-normalise on the resampled grid
+        y_pred_resampled = rec["mu"] + rec["sigma"] * y_pred_all_n[i]
+
+        # resample prediction back to the original future length
+        future_orig = np.asarray(rec["future"], dtype=np.float64)
+        history_orig = np.asarray(rec["history"], dtype=np.float64)
+        y_pred_orig = resample_series(y_pred_resampled, len(future_orig))
+
         predictions.append({
-            "future_pred": y_pred,
-            "future_true_model": rec["future_model"],
-            "rmse": rmse(rec["future_model"], y_pred),
-            "relative_rmse": relative_rmse(rec["future_model"], y_pred),
-            "mase": mase(rec["future_model"], y_pred, rec["history_model"]),
+            "future_pred": y_pred_orig,
+            "future_true": future_orig,
+            "future_pred_resampled": y_pred_resampled,
+            "future_true_resampled": rec["future_model"],
+            "rmse": rmse(future_orig, y_pred_orig),
+            "relative_rmse": relative_rmse(future_orig, y_pred_orig),
+            "mase": mase(future_orig, y_pred_orig, history_orig),
             "lengthscale": model.get("lengthscale"),
         })
 

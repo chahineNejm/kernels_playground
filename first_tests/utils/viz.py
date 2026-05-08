@@ -306,7 +306,7 @@ def plot_predictions_for_domain(
 
     for ax, record, pred in zip(axes, records, predictions):
         h = record["history"]
-        future = pred["future_true_model"]
+        future = pred.get("future_true", pred.get("future_true_resampled"))
         pred_f = pred["future_pred"]
         ctx = h[-min(history_context, len(h)):]
         h_x = np.arange(-len(ctx), 0)
@@ -414,10 +414,11 @@ def report_eval(
         pred = preds[i]
         h = rec["history"][-min(history_context, len(rec["history"])):]
         h_x = np.arange(-len(h), 0)
-        f_x = np.arange(len(pred["future_true_model"]))
+        f_true = pred.get("future_true", pred.get("future_true_resampled"))
+        f_x = np.arange(len(f_true))
 
         ax.plot(h_x, h, color="0.65", lw=1, label="history")
-        ax.plot(f_x, pred["future_true_model"], color="black", lw=1.4, label="actual")
+        ax.plot(f_x, f_true, color="black", lw=1.4, label="actual")
         ax.plot(f_x, pred["future_pred"], color="tab:orange", ls="--", lw=1.4, label="predicted")
         ax.axvline(0, color="tab:blue", ls=":", lw=0.8)
         ax.set_title(
@@ -454,7 +455,7 @@ def report_eval(
         )
 
     # -- 5. aggregated residuals -------------------------------
-    all_true = np.concatenate([p["future_true_model"] for p in preds])
+    all_true = np.concatenate([p.get("future_true", p.get("future_true_resampled")) for p in preds])
     all_pred = np.concatenate([p["future_pred"] for p in preds])
     figs["residuals"] = plot_residuals(
         all_true, all_pred,
