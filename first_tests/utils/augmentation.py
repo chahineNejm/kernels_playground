@@ -415,7 +415,12 @@ def augment_train(
                             arr = smooth(arr, window=smooth_window)
                         if do_jitter:
                             arr = jitter(arr, sigma=jitter_sigma, rng=rng)
-
+                        
+                        mu = float(np.mean(arr))
+                        sigma = float(np.std(arr))
+                        if sigma < 1e-8:
+                            sigma = 1.0
+                        arr = (arr - mu) / sigma
                         new_rec[key] = arr
 
                     # rebuild x_model
