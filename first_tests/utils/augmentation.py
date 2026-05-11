@@ -241,11 +241,11 @@ def crop_or_pad(
 
 
 # ===================================================================
-# BATCH HELPER — augment a list of example dicts
+# BATCH HELPER — augment prepared train examples
 # ===================================================================
 
-def augment_examples(
-    examples: list[dict[str, Any]],
+def augment_train(
+    train_records: list[dict[str, Any]],
     *,
     phase_shifts: Sequence[int] | None = None,
     phase_fill: str = "edge",
@@ -254,14 +254,15 @@ def augment_examples(
     crop_target_len: int | None = None,
     crop_min_len: int | None = None,
     seed: int = 0,
-    keys: Sequence[str] = ("history", "future"),
+    feature_fn: Any | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Apply augmentation transforms to every example in a list.
+    Augment **prepared** train examples (output of ``prepare_examples``).
 
-    Each example dict is shallow-copied, and only the arrays listed in
-    *keys* are transformed (by default ``history`` and ``future``).
-    The original list is never mutated.
+    Call this on the train split only, after ``prepare_examples`` has
+    cleaned, resampled, and normalised everything.  The transforms are
+    applied to the normalised arrays (``history_n`` and ``future_n``),
+    and ``x_model`` is rebuilt afterwards.
 
     The transforms are applied in order:
         1. crop_or_pad  (if ``crop_target_len`` is set)
@@ -271,9 +272,9 @@ def augment_examples(
 
     Parameters
     ----------
-    examples : list[dict]
-        Typically the output of ``build_examples`` or a train-only
-        subset of it.
+    train_records : list[dict]
+        Train-only slice of the output of ``prepare_examples``.
+        Each dict must have at least ``history_n`` and ``future_n``.
     phase_shifts : list of int, optional
         Candidate shift amounts in time steps, e.g. ``[1, 3, 10]``.
         One is chosen at random per series, direction is also random.
@@ -292,23 +293,41 @@ def augment_examples(
         Defaults to ``crop_target_len // 2`` if crop_target_len is set.
     seed : int
         Master random seed.
-    keys : sequence of str
-        Which array-valued keys in each example dict to augment.
+    feature_fn : callable, optional
+        Same as in ``prepare_examples``.  If provided, ``x_model`` is
+        rebuilt by calling ``feature_fn(record)`` on each augmented
+        record.  If None, ``x_model`` is set to the augmented
+        ``history_n``.
 
     Returns
     -------
     list[dict]
-        Augmented copies.  May be shorter than the input if some
-        series were too short for ``crop_or_pad``.
+        Augmented copies of the train records (originals untouched).
+        May be shorter than the input if ``crop_or_pad`` rejects some
+        series.
+
+    Example
+    -------
+    >>> examples = prepare_examples(raw, history_len=3000, future_len=700)
+    >>> train = [examples[i] for i in train_idx]
+    >>> test  = [examples[i] for i in test_idx]
+    >>> train_aug = augment_train(
+    ...     train,
+    ...     phase_shifts=[1, 3, 10],
+    ...     smooth_window=5,
+    ...     jitter_sigma=0.03,
+    ...     seed=42,
+    ... )
+    >>> result = train_eval(train_examples=train_aug, test_examples=test)
     """
     rng = np.random.default_rng(seed)
     augmented: list[dict[str, Any]] = []
 
-    for rec in examples:
+    for rec in train_records:
         new_rec = dict(rec)  # shallow copy
         skip = False
 
-        for key in keys:
+        for key in ("history_n", "future_n"):
             if key not in new_rec:
                 continue
             arr = np.asarray(new_rec[key], dtype=np.float64).ravel()
@@ -338,7 +357,15 @@ def augment_examples(
 
             new_rec[key] = arr
 
-        if not skip:
-            augmented.append(new_rec)
+        if skip:
+            continue
+
+        # rebuild x_model from the augmented history_n
+        if feature_fn is not None:
+            new_rec["x_model"] = feature_fn(new_rec)
+        else:
+            new_rec["x_model"] = new_rec["history_n"]
+
+        augmented.append(new_rec)
 
     return augmented

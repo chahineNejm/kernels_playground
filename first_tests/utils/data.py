@@ -326,7 +326,6 @@ def prepare_examples(
     min_history: int | None = None,
     min_future: int | None = None,
     feature_fn: Any | None = None,
-    augment: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Resample to uniform lengths and Z-normalize. Call this on a subset
@@ -363,36 +362,6 @@ def prepare_examples(
             def multivariate(rec):
                 return np.column_stack([rec["history_n"], rec["temperature_n"]])
 
-    augment : dict, optional
-        If provided, augmentation is applied to the raw examples
-        **before** resampling and normalization.  This should only be
-        used on training data, never on test data.
-
-        The dict is passed as keyword arguments to
-        ``augmentation.augment_examples``.  Supported keys::
-
-            phase_shifts    : list[int]  (e.g. [1, 3, 10]; None = off)
-            phase_fill      : str        ("edge", "wrap", "reflect")
-            smooth_window   : int        (default 1 = off)
-            jitter_sigma    : float      (default 0, e.g. 0.05 for 5 %)
-            crop_target_len : int        (force all series to this length)
-            crop_min_len    : int        (reject series shorter than this)
-            seed            : int        (default 0)
-
-        Example::
-
-            prepare_examples(
-                train_raw,
-                history_len=3000,
-                future_len=700,
-                augment=dict(
-                    phase_shifts=[1, 3, 10],
-                    smooth_window=5,
-                    jitter_sigma=0.03,
-                    seed=42,
-                ),
-            )
-
     Returns
     -------
     list[dict] with keys:
@@ -402,11 +371,6 @@ def prepare_examples(
         x_model   (kernel input — built by feature_fn or = history_n)
         + any extra keys carried forward from build_examples
     """
-    # -- augmentation (before filtering / resampling) -----------
-    if augment is not None:
-        from utils.augmentation import augment_examples
-        examples = augment_examples(examples, **augment)
-
     # -- filter by minimum lengths -----------------------------
     filtered = examples
     if min_history is not None:
