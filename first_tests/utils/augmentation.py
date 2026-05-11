@@ -1,21 +1,33 @@
 """
-Data augmentation for time-series training examples.
+Data augmentation and uniform-length cleaning for time-series examples.
 
-Augmentation **multiplies** the training set — the original series is
-always kept, and each transform produces additional copies.
+Dataset cleaning
+----------------
+    uniform_length — crop or duplicate-pad every series to a fixed
+                     length.  **Single entry-point** for resizing —
+                     call on build_examples output before anything else.
+    crop_or_pad    — low-level helper used by uniform_length.
 
-Individual transforms (each returns a new array, same length as input)
-----------------------------------------------------------------------
+Augmentation transforms (each returns a new array, same length)
+---------------------------------------------------------------
     apply_shift    — translate by a fixed number of steps
     smooth         — centred moving-average
     jitter         — additive Gaussian noise
-    crop_or_pad    — force a series to exactly ``target_len``
 
 Batch helper
 ------------
-    augment_train  — take the *train* slice of ``prepare_examples``
-                     output, return an expanded list with the original
-                     records **plus** all augmented copies.
+    augment_train  — full Cartesian grid of (shift × smooth × jitter)
+                     on the *train* slice.  Original is always kept.
+
+Typical pipeline
+----------------
+    raw      = build_examples(...)
+    fixed    = uniform_length(raw, target_len=3000, min_len=1500)
+    prepared = prepare_examples(fixed)
+    train    = [prepared[i] for i in train_idx]
+    test     = [prepared[i] for i in test_idx]
+    train    = augment_train(train, phase_shifts=[1,3,10], ...)
+    result   = train_eval(train_examples=train, test_examples=test)
 """
 
 from __future__ import annotations
@@ -209,31 +221,95 @@ def crop_or_pad(
 
 
 # ===================================================================
-# INTERNAL: build one augmented copy of a prepared record
+# UNIFORM LENGTH — crop/pad a whole dataset in one place
 # ===================================================================
 
-def _augment_record(
-    rec: dict[str, Any],
-    transform_fn,
-    feature_fn: Any | None,
-) -> dict[str, Any]:
+def uniform_length(
+    examples: list[dict[str, Any]],
+    target_len: int,
+    min_len: int | None = None,
+    seed: int = 0,
+    keys: Sequence[str] = ("history", "future"),
+    verbose: bool = True,
+) -> list[dict[str, Any]]:
     """
-    Apply *transform_fn* to history_n and future_n, rebuild x_model.
-    Returns a new dict (shallow copy + replaced arrays).
+    Force every series in *examples* to exactly ``target_len`` points.
+
+    This is the **single entry-point** for resizing raw series.  Call
+    it on the output of ``build_examples`` before anything else
+    (normalization, augmentation, train/test split).
+
+    Rules per series (applied independently to each key):
+        - ``len >= target_len`` → crop from the start (keep tail).
+        - ``min_len <= len < target_len`` → duplicate a contiguous
+          segment and append it until the series reaches target_len.
+        - ``len < min_len`` → the whole example is **dropped**.
+
+    Parameters
+    ----------
+    examples : list[dict]
+        Output of ``build_examples``.
+    target_len : int
+        Desired length for every series.
+    min_len : int, optional
+        Shortest acceptable raw length.  Examples where *any* key is
+        shorter than this are dropped.  Defaults to ``target_len // 2``.
+    seed : int
+        Random seed (only affects the segment chosen for padding).
+    keys : sequence of str
+        Which array keys to resize.  Default ``("history", "future")``.
+    verbose : bool
+        Print a one-line summary when done.
+
+    Returns
+    -------
+    list[dict]
+        Shallow copies with every listed key exactly ``target_len``
+        long.  May be shorter than the input if some examples were
+        dropped.
+
+    Example
+    -------
+    >>> raw = build_examples("electricity_H_long", start=0, stop=1000)
+    >>> fixed = uniform_length(raw, target_len=3000, min_len=1500)
+    >>> # every fixed[i]["history"] and fixed[i]["future"] is length 3000
     """
-    new = dict(rec)
-    for key in ("history_n", "future_n"):
-        if key in new:
-            new[key] = transform_fn(np.asarray(new[key], dtype=np.float64).ravel())
-    if feature_fn is not None:
-        new["x_model"] = feature_fn(new)
-    else:
-        new["x_model"] = new["history_n"]
-    return new
+    rng = np.random.default_rng(seed)
+    if min_len is None:
+        min_len = target_len // 2
+
+    out: list[dict[str, Any]] = []
+    dropped = 0
+
+    for rec in examples:
+        new_rec = dict(rec)
+        skip = False
+
+        for key in keys:
+            if key not in new_rec:
+                continue
+            arr = np.asarray(new_rec[key], dtype=np.float64).ravel()
+            result = crop_or_pad(arr, target_len, min_len=min_len, rng=rng)
+            if result is None:
+                skip = True
+                break
+            new_rec[key] = result
+
+        if skip:
+            dropped += 1
+            continue
+        out.append(new_rec)
+
+    if verbose:
+        print(
+            f"uniform_length: {len(examples)} examples → {len(out)} kept, "
+            f"{dropped} dropped (target={target_len}, min={min_len})"
+        )
+    return out
 
 
 # ===================================================================
-# BATCH HELPER — augment prepared train examples (multiplicative)
+# BATCH HELPER — augment prepared train examples (full grid)
 # ===================================================================
 
 def augment_train(
@@ -241,71 +317,66 @@ def augment_train(
     *,
     phase_shifts: Sequence[int] | None = None,
     phase_fill: str = "edge",
-    include_random_shift: bool = False,
     smooth_window: int = 1,
     jitter_sigma: float = 0.0,
-    crop_target_len: int | None = None,
-    crop_min_len: int | None = None,
     seed: int = 0,
     feature_fn: Any | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Augment **prepared** train examples by producing additional copies.
+    Augment **prepared** train examples by producing the full
+    **Cartesian product** of all enabled transforms.
 
-    The **original** record is always kept.  Each enabled transform
-    adds extra copies on top:
+    Series must already be at uniform length (via ``uniform_length``
+    then ``prepare_examples``) before calling this.
 
-    - **phase_shifts** ``[1, 3, 10]``: for each value, two copies are
-      produced (``+shift`` and ``-shift``).  With 3 values that's
-      6 extra copies per original.
-    - **include_random_shift**: if True, one more copy with a shift
-      picked at random from ``phase_shifts`` and a random sign.
-    - **smooth_window > 1**: one extra smoothed copy.
-    - **jitter_sigma > 0**: one extra jittered copy.
+    For each original record, every combination of (shift × smooth ×
+    jitter) is produced.  The original (0 shift, no smooth, no jitter)
+    is always included.
 
-    So with ``phase_shifts=[1,3,10]``, ``smooth_window=5``,
-    ``jitter_sigma=0.03`` you get **1 original + 6 shifted + 1 smooth
-    + 1 jitter = 9×** the training set.
+    Grid axes
+    ---------
+    - **shift**:  ``[0] + phase_shifts``.  0 = no shift (always
+      present).  Pass negative values explicitly for left shifts,
+      e.g. ``[1, -1, 3, -3, 10, -10]``.
+    - **smooth**: ``[False, True]`` if ``smooth_window > 1``,
+      else ``[False]``.
+    - **jitter**: ``[False, True]`` if ``jitter_sigma > 0``,
+      else ``[False]``.
 
-    crop_or_pad is applied to *every* record (original and copies)
-    before any other transform, if ``crop_target_len`` is set.
+    Example sizes
+    -------------
+    ``phase_shifts=[1,3,10], smooth_window=5, jitter_sigma=0.03``
+    → 4 shifts × 2 smooth × 2 jitter = **16×** per record.
+
+    ``phase_shifts=[1,-1,3,-3,10,-10], smooth_window=5, jitter_sigma=0.03``
+    → 7 × 2 × 2 = **28×** per record.
+
+    Application order: shift → smooth → jitter.
 
     Parameters
     ----------
     train_records : list[dict]
         Train-only slice of ``prepare_examples`` output.
     phase_shifts : list of int, optional
-        Step counts for deterministic shifts, e.g. ``[1, 3, 10]``.
-        Both +s and -s are produced for each value.
-        ``None`` = no shift augmentation.
+        Shift amounts (signed).  ``None`` = no shift axis (only 0).
     phase_fill : str
         Fill mode (``"edge"``, ``"wrap"``, ``"reflect"``).
-    include_random_shift : bool
-        Add one extra copy with a randomly chosen shift from the list.
     smooth_window : int
-        Moving-average window for the smoothed copy.  1 = no smooth copy.
+        Moving-average window.  1 = smooth axis disabled.
     jitter_sigma : float
-        Noise level for the jittered copy.  0 = no jitter copy.
-    crop_target_len : int, optional
-        Force all series (original + copies) to this length.
-    crop_min_len : int, optional
-        Reject series shorter than this.  Defaults to ``crop_target_len // 2``.
+        Noise level (relative to series std).  0 = jitter axis disabled.
     seed : int
-        Random seed (only used by jitter and include_random_shift).
+        Random seed (used by jitter).
     feature_fn : callable, optional
         Rebuilds ``x_model``.  If None, ``x_model = history_n``.
 
     Returns
     -------
     list[dict]
-        Original records + all augmented copies, ready for
-        ``train_eval(train_examples=...)``.
+        All grid combinations for every input record.
 
     Example
     -------
-    >>> examples = prepare_examples(raw, history_len=3000, future_len=700)
-    >>> train = [examples[i] for i in train_idx]
-    >>> test  = [examples[i] for i in test_idx]
     >>> train_aug = augment_train(
     ...     train,
     ...     phase_shifts=[1, 3, 10],
@@ -313,74 +384,46 @@ def augment_train(
     ...     jitter_sigma=0.03,
     ...     seed=42,
     ... )
-    >>> # train_aug is 9× larger than train
-    >>> result = train_eval(train_examples=train_aug, test_examples=test)
+    >>> # 16× larger than train
     """
     rng = np.random.default_rng(seed)
+
+    # --- build grid axes -----------------------------------------
+    shift_axis = [0] + (list(phase_shifts) if phase_shifts is not None else [])
+    smooth_axis = [False, True] if smooth_window > 1 else [False]
+    jitter_axis = [False, True] if jitter_sigma > 0 else [False]
+
     result: list[dict[str, Any]] = []
 
     for rec in train_records:
-        # --- optional crop/pad on the original first ---------------
-        if crop_target_len is not None:
-            base = dict(rec)
-            skip = False
-            for key in ("history_n", "future_n"):
-                if key not in base:
-                    continue
-                arr = np.asarray(base[key], dtype=np.float64).ravel()
-                cropped = crop_or_pad(arr, crop_target_len,
-                                      min_len=crop_min_len, rng=rng)
-                if cropped is None:
-                    skip = True
-                    break
-                base[key] = cropped
-            if skip:
-                continue
-            # rebuild x_model for the cropped original
-            if feature_fn is not None:
-                base["x_model"] = feature_fn(base)
-            else:
-                base["x_model"] = base["history_n"]
-        else:
-            base = rec
 
-        # 1. always keep the original
-        result.append(base)
+        # --- full grid -------------------------------------------
+        for s in shift_axis:
+            for do_smooth in smooth_axis:
+                for do_jitter in jitter_axis:
 
-        # 2. phase-shift copies: +s and -s for every s in the list
-        if phase_shifts is not None:
-            for s in phase_shifts:
-                for sign in (+1, -1):
-                    signed_shift = sign * s
-                    result.append(_augment_record(
-                        base,
-                        lambda x, _s=signed_shift: apply_shift(x, _s, fill=phase_fill),
-                        feature_fn,
-                    ))
+                    new_rec = dict(rec)
 
-            # 2b. optional random-shift copy
-            if include_random_shift:
-                rand_s = int(rng.choice(phase_shifts)) * int(rng.choice([-1, 1]))
-                result.append(_augment_record(
-                    base,
-                    lambda x, _s=rand_s: apply_shift(x, _s, fill=phase_fill),
-                    feature_fn,
-                ))
+                    for key in ("history_n", "future_n"):
+                        if key not in new_rec:
+                            continue
+                        arr = np.asarray(new_rec[key], dtype=np.float64).ravel()
 
-        # 3. smoothed copy
-        if smooth_window > 1:
-            result.append(_augment_record(
-                base,
-                lambda x: smooth(x, window=smooth_window),
-                feature_fn,
-            ))
+                        if s != 0:
+                            arr = apply_shift(arr, s, fill=phase_fill)
+                        if do_smooth:
+                            arr = smooth(arr, window=smooth_window)
+                        if do_jitter:
+                            arr = jitter(arr, sigma=jitter_sigma, rng=rng)
 
-        # 4. jittered copy
-        if jitter_sigma > 0:
-            result.append(_augment_record(
-                base,
-                lambda x: jitter(x, sigma=jitter_sigma, rng=rng),
-                feature_fn,
-            ))
+                        new_rec[key] = arr
+
+                    # rebuild x_model
+                    if feature_fn is not None:
+                        new_rec["x_model"] = feature_fn(new_rec)
+                    else:
+                        new_rec["x_model"] = new_rec["history_n"]
+
+                    result.append(new_rec)
 
     return result

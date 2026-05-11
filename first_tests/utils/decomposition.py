@@ -516,8 +516,6 @@ def make_decomposition_feature_fn(
     >>> #   column 0 = original history_n
     >>> #   columns 1-4 = first 4 IMFs
     """
-    from utils.data import resample_series
-
     def feature_fn(rec):
         h = rec["history_n"]
         modes = decompose_series(h, method=method, **decompose_kwargs)
@@ -525,17 +523,23 @@ def make_decomposition_feature_fn(
         if max_modes is not None and modes.shape[0] > max_modes:
             modes = modes[:max_modes]
 
-        tgt = target_len if target_len is not None else len(h)
-
-        # resample each mode to target length
-        resampled = np.array([
-            resample_series(m, tgt) for m in modes
-        ])  # (n_modes, tgt)
+        # modes already have the same length as h (uniform_length
+        # ensures all series are the same size before this point).
+        # If target_len is set and differs, crop/pad via
+        # augmentation.crop_or_pad; otherwise use as-is.
+        if target_len is not None and target_len != len(h):
+            from utils.augmentation import crop_or_pad
+            modes = np.array([
+                crop_or_pad(m, target_len, min_len=0) for m in modes
+            ])
+            h_feat = crop_or_pad(h, target_len, min_len=0)
+        else:
+            h_feat = h
 
         channels = []
         if include_original:
-            channels.append(resample_series(h, tgt))
-        for m in resampled:
+            channels.append(h_feat)
+        for m in modes:
             channels.append(m)
 
         return np.column_stack(channels)  # (tgt, n_channels)

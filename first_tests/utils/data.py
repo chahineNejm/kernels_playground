@@ -13,8 +13,16 @@ Dataset access:
     quick_peek          - grab a single sample
     dataset_summary     - stats for the first N samples
     build_examples      - load + clean only (raw lengths preserved)
-    prepare_examples    - resample to target lengths + normalize (call before training)
+    prepare_examples    - Z-normalize (call before training;
+                          series must already be uniform length via
+                          augmentation.uniform_length)
     list_pretrain_subsets - discover available pretrain subsets
+
+Typical pipeline:
+    raw      = build_examples(...)
+    fixed    = uniform_length(raw, target_len=3000, min_len=1500)
+    prepared = prepare_examples(fixed)
+    # split into train / test, then augment train only
 """
 
 from __future__ import annotations
@@ -252,7 +260,7 @@ def dataset_summary(
 
 
 # ===================================================================
-# LOAD + CLEAN (no normalization, no resampling)
+# LOAD + CLEAN (no normalization, no resizing)
 # ===================================================================
 
 def build_examples(
@@ -315,34 +323,27 @@ def build_examples(
 
 
 # ===================================================================
-# RESAMPLE + NORMALIZE (call before training)
+# NORMALIZE (call before training)
 # ===================================================================
 
 def prepare_examples(
     examples: list[dict[str, Any]],
     *,
-    history_len: int | None = None,
-    future_len: int | None = None,
-    min_history: int | None = None,
-    min_future: int | None = None,
     feature_fn: Any | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Resample to uniform lengths and Z-normalize. Call this on a subset
-    of build_examples output right before training.
+    Z-normalize examples whose series are already at uniform length.
+
+    Call ``augmentation.uniform_length`` **before** this function to
+    crop/pad all series to the same size.  This function only
+    normalizes and builds the kernel input — it does not resize.
 
     Parameters
     ----------
     examples : list[dict]
-        Output of build_examples. Each dict must have 'history' and 'future'.
-    history_len : int, optional
-        Target history length. If None, uses the median across examples.
-    future_len : int, optional
-        Target future length. If None, uses the median across examples.
-    min_history : int, optional
-        Drop any sample with history shorter than this (before resampling).
-    min_future : int, optional
-        Drop any sample with future shorter than this (before resampling).
+        Output of ``build_examples`` after passing through
+        ``uniform_length``.  Each dict must have 'history' and 'future'
+        arrays of the same length across all examples.
     feature_fn : callable, optional
         A function  f(example_dict) -> np.ndarray  that builds the kernel
         input from each prepared example.  The dict it receives already has
@@ -366,44 +367,25 @@ def prepare_examples(
     -------
     list[dict] with keys:
         sample_idx, history, future,
-        history_model, future_model,
         history_n, future_n, mu, sigma,
         x_model   (kernel input — built by feature_fn or = history_n)
         + any extra keys carried forward from build_examples
     """
-    # -- filter by minimum lengths -----------------------------
-    filtered = examples
-    if min_history is not None:
-        filtered = [e for e in filtered if len(e["history"]) >= min_history]
-    if min_future is not None:
-        filtered = [e for e in filtered if len(e["future"]) >= min_future]
-
-    if not filtered:
+    if not examples:
         return []
 
-    # -- resolve target lengths --------------------------------
-    h_lengths = [len(e["history"]) for e in filtered]
-    f_lengths = [len(e["future"]) for e in filtered]
-
-    if history_len is None:
-        history_len = int(np.median(h_lengths))
-    if future_len is None:
-        future_len = int(np.median(f_lengths))
-
-    # -- resample + normalize ----------------------------------
+    # -- normalize ---------------------------------------------
     _core_keys = {"sample_idx", "history", "future"}
     prepared: list[dict[str, Any]] = []
-    for rec in filtered:
-        hm = resample_series(rec["history"], history_len)
-        fm = resample_series(rec["future"], future_len)
-        hn, fn, mu, sigma = normalize_by_history(hm, fm)
+    for rec in examples:
+        h = rec["history"]
+        f = rec["future"]
+        hn, fn, mu, sigma = normalize_by_history(h, f)
 
         entry: dict[str, Any] = {
             "sample_idx": rec["sample_idx"],
-            "history": rec["history"],
-            "future": rec["future"],
-            "history_model": hm,
-            "future_model": fm,
+            "history": h,
+            "future": f,
             "history_n": hn,
             "future_n": fn,
             "mu": mu,

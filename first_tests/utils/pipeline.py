@@ -16,7 +16,7 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from utils.config import DEFAULT_CONFIG
-from utils.data import build_examples, prepare_examples, resolve_config, resample_series
+from utils.data import build_examples, prepare_examples, resolve_config
 from utils.kernels import (
     Kernel,
     fit_kernel_operator,
@@ -144,7 +144,7 @@ def train_eval(
         Single pool of prepared examples (mode B).
     train_examples, test_examples : list[dict], optional
         Separate train/test lists (mode A).  Each dict must have
-        'history_n', 'future_n', 'future_model', 'mu', 'sigma'.
+        'history_n', 'future_n', 'mu', 'sigma'.
     train_indices, test_indices : array-like, optional
         Only used in mode B.
     n_test : int
@@ -268,22 +268,18 @@ def train_eval(
 
     predictions: list[dict[str, Any]] = []
     for i, rec in enumerate(test_records):
-        # un-normalise on the resampled grid
-        y_pred_resampled = rec["mu"] + rec["sigma"] * y_pred_all_n[i]
+        # un-normalise
+        y_pred = rec["mu"] + rec["sigma"] * y_pred_all_n[i]
 
-        # resample prediction back to the original future length
-        future_orig = np.asarray(rec["future"], dtype=np.float64)
-        history_orig = np.asarray(rec["history"], dtype=np.float64)
-        y_pred_orig = resample_series(y_pred_resampled, len(future_orig))
+        future_true = np.asarray(rec["future"], dtype=np.float64)
+        history_true = np.asarray(rec["history"], dtype=np.float64)
 
         predictions.append({
-            "future_pred": y_pred_orig,
-            "future_true": future_orig,
-            "future_pred_resampled": y_pred_resampled,
-            "future_true_resampled": rec["future_model"],
-            "rmse": rmse(future_orig, y_pred_orig),
-            "relative_rmse": relative_rmse(future_orig, y_pred_orig),
-            "mase": mase(future_orig, y_pred_orig, history_orig),
+            "future_pred": y_pred,
+            "future_true": future_true,
+            "rmse": rmse(future_true, y_pred),
+            "relative_rmse": relative_rmse(future_true, y_pred),
+            "mase": mase(future_true, y_pred, history_true),
             "lengthscale": model.get("lengthscale"),
         })
 
@@ -315,10 +311,8 @@ def run_all_domains(
     start: int = 0,
     stop: int | None = None,
     step: int = 1,
-    history_len: int | None = None,
-    future_len: int | None = None,
-    min_history: int | None = None,
-    min_future: int | None = None,
+    target_len: int = 3000,
+    min_len: int | None = None,
     train_indices: np.ndarray | Sequence[int] | None = None,
     test_indices: np.ndarray | Sequence[int] | None = None,
     n_test: int = DEFAULT_CONFIG["N_TEST_SAMPLES"],
@@ -338,10 +332,10 @@ def run_all_domains(
         Defaults to DEFAULT_CONFIG["CONFIGS"].
     start, stop, step : int
         Passed to build_examples for each domain.
-    history_len, future_len : int, optional
-        Target lengths for prepare_examples. None = use median.
-    min_history, min_future : int, optional
-        Drop samples shorter than these before resampling.
+    target_len : int
+        Fixed length for all series (via uniform_length).
+    min_len : int, optional
+        Drop series shorter than this. Defaults to target_len // 2.
     train_indices, test_indices : array-like, optional
         Explicit indices (applied identically to every domain).
         See train_eval for the split modes.
@@ -350,6 +344,8 @@ def run_all_domains(
     -------
     dict mapping domain name -> TrainEvalResult
     """
+    from utils.augmentation import uniform_length
+
     if configs is None:
         configs = DEFAULT_CONFIG["CONFIGS"]
 
@@ -365,13 +361,14 @@ def run_all_domains(
                 step=step,
                 dataset_name=dataset_name,
             )
-            examples = prepare_examples(
+            fixed = uniform_length(
                 raw,
-                history_len=history_len,
-                future_len=future_len,
-                min_history=min_history,
-                min_future=min_future,
+                target_len=target_len,
+                min_len=min_len,
+                seed=seed,
+                verbose=verbose,
             )
+            examples = prepare_examples(fixed)
             result = train_eval(
                 examples,
                 domain=domain,
