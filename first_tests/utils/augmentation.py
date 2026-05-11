@@ -1,35 +1,3 @@
-"""
-Data augmentation and uniform-length cleaning for time-series examples.
-
-Dataset cleaning
-----------------
-    uniform_length — crop or duplicate-pad every series to a fixed
-                     length.  **Single entry-point** for resizing —
-                     call on build_examples output before anything else.
-    crop_or_pad    — low-level helper used by uniform_length.
-
-Augmentation transforms (each returns a new array, same length)
----------------------------------------------------------------
-    apply_shift    — translate by a fixed number of steps
-    smooth         — centred moving-average
-    jitter         — additive Gaussian noise
-
-Batch helper
-------------
-    augment_train  — full Cartesian grid of (shift × smooth × jitter)
-                     on the *train* slice.  Original is always kept.
-
-Typical pipeline
-----------------
-    raw      = build_examples(...)
-    fixed    = uniform_length(raw, target_len=3000, min_len=1500)
-    prepared = prepare_examples(fixed)
-    train    = [prepared[i] for i in train_idx]
-    test     = [prepared[i] for i in test_idx]
-    train    = augment_train(train, phase_shifts=[1,3,10], ...)
-    result   = train_eval(train_examples=train, test_examples=test)
-"""
-
 from __future__ import annotations
 
 from typing import Any, Sequence
@@ -46,34 +14,12 @@ def apply_shift(
     shift: int,
     fill: str = "edge",
 ) -> np.ndarray:
-    """
-    Translate a 1-D series by exactly *shift* steps.
-
-    Positive *shift* → shift right (recent values move later).
-    Negative *shift* → shift left.
-
-    Parameters
-    ----------
-    x : 1-D array
-    shift : int
-        Number of steps to shift (signed).
-    fill : str
-        How to fill the vacated positions:
-
-        - ``"edge"``    — repeat the nearest edge value (default).
-        - ``"wrap"``    — circular / periodic wrap-around.
-        - ``"reflect"`` — mirror the series at the boundary.
-
-    Returns
-    -------
-    np.ndarray   same length as *x*.
-    """
+    """Translate a 1-D series by exactly *shift* steps."""
     x = np.asarray(x, dtype=np.float64).ravel()
     n = len(x)
     if n == 0 or shift == 0:
         return x.copy()
 
-    # clamp so we never exceed the series length
     shift = max(-n + 1, min(shift, n - 1))
 
     if fill == "wrap":
@@ -111,25 +57,21 @@ def smooth(
     x: np.ndarray,
     window: int = 5,
 ) -> np.ndarray:
-    """
-    Smooth a 1-D series with a centred moving average.
-
-    Parameters
-    ----------
-    x : 1-D array
-    window : int
-        Kernel width (should be odd for a symmetric window).  1 = no-op.
-
-    Returns
-    -------
-    np.ndarray   same length as *x*.
-    """
+    """Smooth a 1-D series with a centred moving average."""
     x = np.asarray(x, dtype=np.float64).ravel()
     if window <= 1 or len(x) <= 1:
         return x.copy()
+    
     window = min(window, len(x))
     kernel = np.ones(window) / window
-    return np.convolve(x, kernel, mode="same")
+    
+    # FIX: Edge-pad the array before convolving to prevent the 
+    # start/end of the series from artificially dipping toward zero.
+    pad_left = window // 2
+    pad_right = window - 1 - pad_left
+    x_padded = np.pad(x, pad_width=(pad_left, pad_right), mode='edge')
+    
+    return np.convolve(x_padded, kernel, mode="valid")
 
 
 # ===================================================================
@@ -141,29 +83,17 @@ def jitter(
     sigma: float = 0.05,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
-    """
-    Add i.i.d. Gaussian noise to a 1-D series.
-
-    Parameters
-    ----------
-    x : 1-D array
-    sigma : float
-        Standard deviation of the noise **relative to the std of x**.
-        E.g. ``sigma=0.05`` → noise std is 5 % of the series std.
-    rng : numpy Generator, optional
-
-    Returns
-    -------
-    np.ndarray   same length as *x*.
-    """
+    """Add i.i.d. Gaussian noise to a 1-D series."""
     x = np.asarray(x, dtype=np.float64).ravel()
     if rng is None:
         rng = np.random.default_rng()
     if len(x) == 0 or sigma <= 0:
         return x.copy()
+    
     scale = sigma * np.std(x)
     if scale < 1e-12:
         scale = sigma
+        
     return x + rng.normal(0.0, scale, size=len(x))
 
 
@@ -176,27 +106,9 @@ def crop_or_pad(
     target_len: int,
     min_len: int | None = None,
     rng: np.random.Generator | None = None,
+    pad_direction: str = "left",  # FIX: Added padding direction
 ) -> np.ndarray | None:
-    """
-    Force a 1-D series to exactly ``target_len`` points.
-
-    - ``len(x) >= target_len``: crop from the start (keep tail).
-    - ``min_len <= len(x) < target_len``: duplicate a random segment
-      and append it.
-    - ``len(x) < min_len``: return ``None`` (too short).
-
-    Parameters
-    ----------
-    x : 1-D array
-    target_len : int
-    min_len : int, optional
-        Defaults to ``target_len // 2``.
-    rng : numpy Generator, optional
-
-    Returns
-    -------
-    np.ndarray of length ``target_len``, or ``None``.
-    """
+    """Force a 1-D series to exactly ``target_len`` points."""
     x = np.asarray(x, dtype=np.float64).ravel()
     if rng is None:
         rng = np.random.default_rng()
@@ -204,8 +116,14 @@ def crop_or_pad(
         min_len = target_len // 2
 
     n = len(x)
+    
+    # FIX: Crop direction matches pad direction to preserve the most important boundary
     if n >= target_len:
-        return x[n - target_len :].copy()
+        if pad_direction == "left":
+            return x[n - target_len :].copy() # Keep tail
+        else:
+            return x[:target_len].copy()      # Keep head
+
     if n < min_len:
         return None
 
@@ -217,11 +135,15 @@ def crop_or_pad(
         reps = (deficit // len(segment)) + 1
         segment = np.tile(segment, reps)[:deficit]
 
-    return np.concatenate([x, segment])
+    # FIX: Left pad for history (preserves the right boundary), Right pad for future
+    if pad_direction == "left":
+        return np.concatenate([segment, x])
+    else:
+        return np.concatenate([x, segment])
 
 
 # ===================================================================
-# UNIFORM LENGTH — crop/pad a whole dataset in one place
+# UNIFORM LENGTH 
 # ===================================================================
 
 def uniform_length(
@@ -232,48 +154,7 @@ def uniform_length(
     keys: Sequence[str] = ("history", "future"),
     verbose: bool = True,
 ) -> list[dict[str, Any]]:
-    """
-    Force every series in *examples* to exactly ``target_len`` points.
-
-    This is the **single entry-point** for resizing raw series.  Call
-    it on the output of ``build_examples`` before anything else
-    (normalization, augmentation, train/test split).
-
-    Rules per series (applied independently to each key):
-        - ``len >= target_len`` → crop from the start (keep tail).
-        - ``min_len <= len < target_len`` → duplicate a contiguous
-          segment and append it until the series reaches target_len.
-        - ``len < min_len`` → the whole example is **dropped**.
-
-    Parameters
-    ----------
-    examples : list[dict]
-        Output of ``build_examples``.
-    target_len : int
-        Desired length for every series.
-    min_len : int, optional
-        Shortest acceptable raw length.  Examples where *any* key is
-        shorter than this are dropped.  Defaults to ``target_len // 2``.
-    seed : int
-        Random seed (only affects the segment chosen for padding).
-    keys : sequence of str
-        Which array keys to resize.  Default ``("history", "future")``.
-    verbose : bool
-        Print a one-line summary when done.
-
-    Returns
-    -------
-    list[dict]
-        Shallow copies with every listed key exactly ``target_len``
-        long.  May be shorter than the input if some examples were
-        dropped.
-
-    Example
-    -------
-    >>> raw = build_examples("electricity_H_long", start=0, stop=1000)
-    >>> fixed = uniform_length(raw, target_len=3000, min_len=1500)
-    >>> # every fixed[i]["history"] and fixed[i]["future"] is length 3000
-    """
+    """Force every series in *examples* to exactly ``target_len`` points."""
     rng = np.random.default_rng(seed)
     if min_len is None:
         min_len = target_len // 2
@@ -289,7 +170,11 @@ def uniform_length(
             if key not in new_rec:
                 continue
             arr = np.asarray(new_rec[key], dtype=np.float64).ravel()
-            result = crop_or_pad(arr, target_len, min_len=min_len, rng=rng)
+            
+            # FIX: Intelligently pick left or right padding based on the key name
+            pad_dir = "right" if "future" in key.lower() else "left"
+            
+            result = crop_or_pad(arr, target_len, min_len=min_len, rng=rng, pad_direction=pad_dir)
             if result is None:
                 skip = True
                 break
@@ -309,7 +194,7 @@ def uniform_length(
 
 
 # ===================================================================
-# BATCH HELPER — augment prepared train examples (full grid)
+# BATCH HELPER — augment prepared train examples
 # ===================================================================
 
 def augment_train(
@@ -322,73 +207,9 @@ def augment_train(
     seed: int = 0,
     feature_fn: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """
-    Augment **prepared** train examples by producing the full
-    **Cartesian product** of all enabled transforms.
-
-    Series must already be at uniform length (via ``uniform_length``
-    then ``prepare_examples``) before calling this.
-
-    For each original record, every combination of (shift × smooth ×
-    jitter) is produced.  The original (0 shift, no smooth, no jitter)
-    is always included.
-
-    Grid axes
-    ---------
-    - **shift**:  ``[0] + phase_shifts``.  0 = no shift (always
-      present).  Pass negative values explicitly for left shifts,
-      e.g. ``[1, -1, 3, -3, 10, -10]``.
-    - **smooth**: ``[False, True]`` if ``smooth_window > 1``,
-      else ``[False]``.
-    - **jitter**: ``[False, True]`` if ``jitter_sigma > 0``,
-      else ``[False]``.
-
-    Example sizes
-    -------------
-    ``phase_shifts=[1,3,10], smooth_window=5, jitter_sigma=0.03``
-    → 4 shifts × 2 smooth × 2 jitter = **16×** per record.
-
-    ``phase_shifts=[1,-1,3,-3,10,-10], smooth_window=5, jitter_sigma=0.03``
-    → 7 × 2 × 2 = **28×** per record.
-
-    Application order: shift → smooth → jitter.
-
-    Parameters
-    ----------
-    train_records : list[dict]
-        Train-only slice of ``prepare_examples`` output.
-    phase_shifts : list of int, optional
-        Shift amounts (signed).  ``None`` = no shift axis (only 0).
-    phase_fill : str
-        Fill mode (``"edge"``, ``"wrap"``, ``"reflect"``).
-    smooth_window : int
-        Moving-average window.  1 = smooth axis disabled.
-    jitter_sigma : float
-        Noise level (relative to series std).  0 = jitter axis disabled.
-    seed : int
-        Random seed (used by jitter).
-    feature_fn : callable, optional
-        Rebuilds ``x_model``.  If None, ``x_model = history_n``.
-
-    Returns
-    -------
-    list[dict]
-        All grid combinations for every input record.
-
-    Example
-    -------
-    >>> train_aug = augment_train(
-    ...     train,
-    ...     phase_shifts=[1, 3, 10],
-    ...     smooth_window=5,
-    ...     jitter_sigma=0.03,
-    ...     seed=42,
-    ... )
-    >>> # 16× larger than train
-    """
+    """Augment **prepared** train examples by producing the full grid."""
     rng = np.random.default_rng(seed)
 
-    # --- build grid axes -----------------------------------------
     shift_axis = [0] + (list(phase_shifts) if phase_shifts is not None else [])
     smooth_axis = [False, True] if smooth_window > 1 else [False]
     jitter_axis = [False, True] if jitter_sigma > 0 else [False]
@@ -396,37 +217,65 @@ def augment_train(
     result: list[dict[str, Any]] = []
 
     for rec in train_records:
-
-        # --- full grid -------------------------------------------
         for s in shift_axis:
             for do_smooth in smooth_axis:
                 for do_jitter in jitter_axis:
-
                     new_rec = dict(rec)
 
-                    for key in ("history_n", "future_n"):
-                        if key not in new_rec:
-                            continue
-                        arr = np.asarray(new_rec[key], dtype=np.float64).ravel()
+                    has_hist = "history_n" in new_rec
+                    has_fut = "future_n" in new_rec
+                    
+                    if not has_hist and not has_fut:
+                        result.append(new_rec)
+                        continue
 
-                        if s != 0:
-                            arr = apply_shift(arr, s, fill=phase_fill)
-                        if do_smooth:
-                            arr = smooth(arr, window=smooth_window)
-                        if do_jitter:
-                            arr = jitter(arr, sigma=jitter_sigma, rng=rng)
-                        
-                        mu = float(np.mean(arr))
-                        sigma = float(np.std(arr))
+                    # FIX: Combine into a single continuous array for shift & smooth
+                    # This prevents the boundary between history and future from being torn.
+                    parts = []
+                    if has_hist:
+                        parts.append(np.asarray(new_rec["history_n"], dtype=np.float64).ravel())
+                    if has_fut:
+                        parts.append(np.asarray(new_rec["future_n"], dtype=np.float64).ravel())
+                    
+                    arr = np.concatenate(parts)
+                    hist_len = len(parts[0]) if has_hist else 0
+
+                    if s != 0:
+                        arr = apply_shift(arr, s, fill=phase_fill)
+                    if do_smooth:
+                        arr = smooth(arr, window=smooth_window)
+                    
+                    # Split back apart BEFORE applying independent noise
+                    if has_hist:
+                        hist_arr = arr[:hist_len]
+                    if has_fut:
+                        fut_arr = arr[hist_len:]
+
+                    if do_jitter:
+                        if has_hist:
+                            hist_arr = jitter(hist_arr, sigma=jitter_sigma, rng=rng)
+                        if has_fut:
+                            fut_arr = jitter(fut_arr, sigma=jitter_sigma, rng=rng)
+                    
+                    # FIX: Target Leakage. We re-calculate empirical statistics strictly 
+                    # from the history portion, and apply them identically to both arrays.
+                    if has_hist:
+                        mu = float(np.mean(hist_arr))
+                        sigma = float(np.std(hist_arr))
                         if sigma < 1e-8:
                             sigma = 1.0
-                        arr = (arr - mu) / sigma
-                        new_rec[key] = arr
+                        
+                        new_rec["history_n"] = (hist_arr - mu) / sigma
+                        if has_fut:
+                            new_rec["future_n"] = (fut_arr - mu) / sigma
+                    elif has_fut:
+                        # Fallback if only future exists
+                        new_rec["future_n"] = fut_arr
 
-                    # rebuild x_model
+                    # Rebuild x_model
                     if feature_fn is not None:
                         new_rec["x_model"] = feature_fn(new_rec)
-                    else:
+                    elif has_hist:
                         new_rec["x_model"] = new_rec["history_n"]
 
                     result.append(new_rec)
