@@ -3,6 +3,7 @@ Kernel operator regression utilities — pluggable kernel architecture.
 
 Kernel classes (subclass Kernel to add your own):
     RBFKernel            — squared-exponential / Gaussian
+    MaskedRBFKernel      — jointly-masked RBF (missing dimensions)
     LinearKernel         — dot-product
     WaveletKernel        — CWT-based kernel (inner, energy, or coeffs mode)
     NTKKernel            — Neural Tangent Kernel (analytical, infinite-width MLP)
@@ -122,6 +123,183 @@ class RBFKernel(Kernel):
         if self.lengthscale is None:
             raise ValueError("lengthscale not set — call estimate_params or pass it to __init__")
         return np.exp(-squared_distance_matrix(A, B) / (2.0 * self.lengthscale ** 2))
+
+
+# ═══════════════════════════════════════════════════════════════
+# MASKED RBF KERNEL  (jointly-masked RBF for missing dimensions)
+# ═══════════════════════════════════════════════════════════════
+
+def build_mask_matrix(X: np.ndarray) -> np.ndarray:
+    """
+    Build observation masks from data.
+
+    Each sample's mask is a 1-D binary vector: 1 where the value is
+    non-zero (observed), 0 where it is zero (missing).
+
+    Parameters
+    ----------
+    X : (n_samples, d) array
+
+    Returns
+    -------
+    P : (d, n_samples) array
+        Column j is the mask vector for sample j.
+        Compact storage: one column per sample, easy to slice.
+
+    Usage
+    -----
+    >>> P_train = build_mask_matrix(X_train)    # (d, n_train)
+    >>> P_test  = build_mask_matrix(X_test)     # (d, n_test)
+    >>> kernel  = MaskedRBFKernel()
+    >>> kernel.estimate_params(X_train, rng, P_train)
+    >>> G_train = kernel.gram(X_train, X_train, P_train, P_train)
+    >>> G_test  = kernel.gram(X_test, X_train, P_test, P_train)
+    """
+    X = np.asarray(X, dtype=float)
+    return (X != 0).astype(np.float64).T   # (d, n)
+
+
+class MaskedRBFKernel(Kernel):
+    """
+    Jointly-Masked RBF kernel — only compares dimensions observed in both.
+
+    Masks are precomputed via ``build_mask_matrix`` and passed to
+    ``gram`` / ``estimate_params`` explicitly, so they are computed
+    once and reused.
+
+        K(x_i, x_j) = exp( -||P_i P_j (x_i - x_j)||^2 / (2 σ^2 · ||P_i P_j||_F) )
+
+    where P_i, P_j are diagonal observation masks (stored as columns
+    of the mask matrix P).
+
+    Properties:
+        - P_i = P_j = I (fully observed): reduces to standard RBF
+        - No shared observed dims → kernel = 0
+        - Frobenius norm normalises by effective dimensionality
+
+    Convention: zero = missing.  Shift data if genuine zeros exist.
+
+    Parameters
+    ----------
+    lengthscale : float, optional
+        RBF bandwidth σ.  Auto-estimated via masked median heuristic if None.
+    """
+
+    def __init__(self, lengthscale: float | None = None):
+        self.lengthscale = lengthscale
+
+    # -- vectorised masked squared-distance matrix ---------------------
+
+    @staticmethod
+    def _masked_sq_dist(
+        A: np.ndarray,
+        B: np.ndarray,
+        P_a: np.ndarray,
+        P_b: np.ndarray,
+    ):
+        """
+        Compute masked squared distances and Frobenius norms.
+
+        Parameters
+        ----------
+        A   : (n, d)  data matrix
+        B   : (m, d)  data matrix
+        P_a : (d, n)  mask matrix for A  (columns are mask vectors)
+        P_b : (d, m)  mask matrix for B
+
+        Returns
+        -------
+        D2  : (n, m)  masked squared Euclidean distances
+        F   : (n, m)  ||P_i P_j||_F  for each pair
+        """
+        A = np.asarray(A, dtype=float)
+        B = np.asarray(B, dtype=float)
+
+        # masks as row-major for matmul:  (n, d) and (m, d)
+        ma = P_a.T   # (n, d)
+        mb = P_b.T   # (m, d)
+
+        # ||P_i P_j||_F = sqrt( Σ_d  p_i[d] · p_j[d] )
+        shared_count = ma @ mb.T                      # (n, m)
+        F = np.sqrt(np.maximum(shared_count, 0.0))    # (n, m)
+
+        # ||P_i P_j (x_i - x_j)||^2
+        #   = Σ_d  p_i[d]·p_j[d]·(a[d]-b[d])^2
+        #   = (a^2 · p_b) + (p_a · b^2) - 2·(a · b^T)
+        #
+        # Identity holds because p[d]·x[d]^2 = x[d]^2 when p = (x!=0).
+        D2 = (A ** 2) @ mb.T + ma @ (B ** 2).T - 2.0 * A @ B.T
+        D2 = np.maximum(D2, 0.0)
+
+        return D2, F
+
+    # -- median heuristic on masked distances --------------------------
+
+    def estimate_params(self, X, rng, P=None):
+        """
+        Auto-estimate lengthscale from masked pairwise distances.
+
+        Parameters
+        ----------
+        X : (n, d) data
+        rng : Generator
+        P : (d, n) mask matrix, optional.  Built from X if not given.
+        """
+        if self.lengthscale is not None:
+            return
+        X = np.asarray(X, dtype=float)
+        if P is None:
+            P = build_mask_matrix(X)
+
+        n = min(24, X.shape[0])
+        idx = rng.choice(X.shape[0], size=n, replace=False)
+        sub = X[idx]
+        sub_P = P[:, idx]    # (d, n_sub)
+
+        D2, F = self._masked_sq_dist(sub, sub, sub_P, sub_P)
+        safe_F = np.where(F > 0, F, 1.0)
+        eff_dist = np.sqrt(D2 / safe_F)
+
+        upper = eff_dist[np.triu_indices(n, k=1)]
+        upper = upper[(upper > 0) & np.isfinite(upper)]
+        self.lengthscale = float(np.median(upper)) if upper.size else 1.0
+
+    # -- Gram matrix ---------------------------------------------------
+
+    def gram(self, A, B, P_a=None, P_b=None) -> np.ndarray:
+        """
+        Compute the masked RBF Gram matrix.
+
+        Parameters
+        ----------
+        A   : (n, d)  data
+        B   : (m, d)  data
+        P_a : (d, n)  mask matrix for A, optional (built from A if None)
+        P_b : (d, m)  mask matrix for B, optional (built from B if None)
+
+        Returns
+        -------
+        G : (n, m) kernel matrix
+        """
+        if self.lengthscale is None:
+            raise ValueError(
+                "lengthscale not set — call estimate_params or pass it to __init__"
+            )
+        A = np.asarray(A, dtype=float)
+        B = np.asarray(B, dtype=float)
+        if P_a is None:
+            P_a = build_mask_matrix(A)
+        if P_b is None:
+            P_b = build_mask_matrix(B)
+
+        D2, F = self._masked_sq_dist(A, B, P_a, P_b)
+
+        denom = 2.0 * self.lengthscale ** 2 * F
+        safe_denom = np.where(denom > 0, denom, 1.0)
+        G = np.exp(-D2 / safe_denom)
+        G = np.where(F > 0, G, 0.0)
+
+        return G
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1018,6 +1196,7 @@ def fit_kernel_operator(
     gamma: float,
     rng: np.random.Generator,
     kernel: Kernel | None = None,
+    P_train: np.ndarray | None = None,
 ) -> dict:
     """
     Fit a kernel-operator regressor:  y ~ K(x, X_train) * alpha
@@ -1036,10 +1215,13 @@ def fit_kernel_operator(
         For automatic hyperparameter estimation.
     kernel : Kernel, optional
         Any Kernel subclass instance.  Defaults to RBFKernel().
+    P_train : (d, n_samples) array, optional
+        Precomputed mask matrix from ``build_mask_matrix``.
+        Only used when kernel is MaskedRBFKernel.
 
     Returns
     -------
-    dict with keys: x_train, alpha, kernel, gamma, lengthscale
+    dict with keys: x_train, alpha, kernel, gamma, lengthscale, [P_train]
     """
     if kernel is None:
         kernel = RBFKernel()
@@ -1059,6 +1241,22 @@ def fit_kernel_operator(
             "M": kernel.M,
         }
 
+    # MaskedRBFKernel — pass masks explicitly
+    if isinstance(kernel, MaskedRBFKernel):
+        if P_train is None:
+            P_train = build_mask_matrix(x_train)
+        kernel.estimate_params(x_train, rng, P=P_train)
+        G = kernel.gram(x_train, x_train, P_a=P_train, P_b=P_train)
+        alpha = np.linalg.solve(G + gamma * np.eye(G.shape[0]), y_train)
+        return {
+            "x_train": x_train,
+            "alpha": alpha,
+            "kernel": kernel,
+            "gamma": gamma,
+            "lengthscale": kernel.lengthscale,
+            "P_train": P_train,
+        }
+
     kernel.estimate_params(x_train, rng)
 
     G = kernel(x_train, x_train)
@@ -1069,15 +1267,38 @@ def fit_kernel_operator(
         "alpha": alpha,
         "kernel": kernel,
         "gamma": gamma,
-        # backward compat — None for kernels that don't have it
         "lengthscale": getattr(kernel, "lengthscale", None),
     }
 
 
-def predict_kernel_operator(model: dict, x_query) -> np.ndarray:
-    """Predict using a fitted kernel-operator model."""
+def predict_kernel_operator(
+    model: dict,
+    x_query,
+    P_query: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Predict using a fitted kernel-operator model.
+
+    Parameters
+    ----------
+    model : dict from fit_kernel_operator
+    x_query : query inputs
+    P_query : (d, n_query) mask matrix, optional.
+        Only used when model was fitted with MaskedRBFKernel.
+        Built from x_query if not given.
+    """
     kernel = model["kernel"]
-    k = kernel(x_query, model["x_train"])
+
+    if isinstance(kernel, MaskedRBFKernel):
+        P_train = model.get("P_train")
+        if P_query is None:
+            P_query = build_mask_matrix(x_query)
+        if P_train is None:
+            P_train = build_mask_matrix(model["x_train"])
+        k = kernel.gram(x_query, model["x_train"], P_a=P_query, P_b=P_train)
+    else:
+        k = kernel(x_query, model["x_train"])
+
     return k @ model["alpha"]
 
 
@@ -1100,9 +1321,6 @@ def mase(y_true: np.ndarray, y_pred: np.ndarray, y_history: np.ndarray) -> float
 
     MASE = MAE(forecast) / MAE(naive one-step forecast on history).
 
-    The naive baseline is the random-walk forecast: \u0177_t = y_{t-1},
-    so its MAE is the mean of |y_t - y_{t-1}| over the history.
-
     Parameters
     ----------
     y_true    : (H,) actual future values
@@ -1118,6 +1336,6 @@ def mase(y_true: np.ndarray, y_pred: np.ndarray, y_history: np.ndarray) -> float
     y_history = np.asarray(y_history, dtype=float)
 
     mae_forecast = float(np.mean(np.abs(y_true - y_pred)))
-    naive_errors = np.abs(np.diff(y_history))          # |h[t] - h[t-1]|
+    naive_errors = np.abs(np.diff(y_history))
     mae_naive = float(np.mean(naive_errors)) if len(naive_errors) > 0 else 0.0
     return mae_forecast / mae_naive if mae_naive > 1e-12 else 0.0
