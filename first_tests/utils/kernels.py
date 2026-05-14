@@ -1226,12 +1226,17 @@ def fit_kernel_operator(
     if kernel is None:
         kernel = RBFKernel()
 
+    verbose = True
+    n = y_train.shape[0] if hasattr(y_train, 'shape') else len(y_train)
+
     # RFM / ConvRFM have their own iterative training loop
     if isinstance(kernel, (RFMKernel, ConvRFMKernel)):
         kernel.fit_rfm(x_train, y_train, gamma=gamma, rng=rng)
-        # after fit_rfm, M is learned — do one final solve with learned M
+        print(f"  [fit] building Gram matrix ({n}x{n})...")
         G = kernel(x_train, x_train)
+        print(f"  [fit] solving linear system ({n}x{n})...")
         alpha = np.linalg.solve(G + gamma * np.eye(G.shape[0]), y_train)
+        print(f"  [fit] done.")
         return {
             "x_train": x_train,
             "alpha": alpha,
@@ -1245,9 +1250,14 @@ def fit_kernel_operator(
     if isinstance(kernel, MaskedRBFKernel):
         if P_train is None:
             P_train = build_mask_matrix(x_train)
+        print(f"  [fit] estimating lengthscale ({kernel.__class__.__name__})...")
         kernel.estimate_params(x_train, rng, P=P_train)
+        print(f"  [fit] lengthscale = {kernel.lengthscale:.4f}")
+        print(f"  [fit] building masked Gram matrix ({n}x{n})...")
         G = kernel.gram(x_train, x_train, P_a=P_train, P_b=P_train)
+        print(f"  [fit] solving linear system ({n}x{n})...")
         alpha = np.linalg.solve(G + gamma * np.eye(G.shape[0]), y_train)
+        print(f"  [fit] done.")
         return {
             "x_train": x_train,
             "alpha": alpha,
@@ -1257,10 +1267,14 @@ def fit_kernel_operator(
             "P_train": P_train,
         }
 
+    print(f"  [fit] estimating lengthscale ({kernel.__class__.__name__})...")
     kernel.estimate_params(x_train, rng)
-
+    print(f"  [fit] lengthscale = {getattr(kernel, 'lengthscale', 'N/A')}")
+    print(f"  [fit] building Gram matrix ({n}x{n})...")
     G = kernel(x_train, x_train)
+    print(f"  [fit] solving linear system ({n}x{n})...")
     alpha = np.linalg.solve(G + gamma * np.eye(G.shape[0]), y_train)
+    print(f"  [fit] done.")
 
     return {
         "x_train": x_train,
