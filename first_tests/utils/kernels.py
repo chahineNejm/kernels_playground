@@ -203,7 +203,8 @@ class MaskedRBFKernel(Kernel):
         - No shared observed dims → kernel = 0
         - Frobenius norm normalises by effective dimensionality
 
-    Convention: zero = missing.  Shift data if genuine zeros exist.
+    Masks can now mark any position as unobserved, regardless of its
+    value — the distance computation zeroes out masked positions internally.
 
     Parameters
     ----------
@@ -251,10 +252,13 @@ class MaskedRBFKernel(Kernel):
 
         # ||P_i P_j (x_i - x_j)||^2
         #   = Σ_d  p_i[d]·p_j[d]·(a[d]-b[d])^2
-        #   = (a^2 · p_b) + (p_a · b^2) - 2·(a · b^T)
         #
-        # Identity holds because p[d]·x[d]^2 = x[d]^2 when p = (x!=0).
-        D2 = (A ** 2) @ mb.T + ma @ (B ** 2).T - 2.0 * A @ B.T
+        # Zero out data at unobserved positions so the vectorised
+        # expansion is correct even when masked values are non-zero
+        # (e.g. after Z-normalisation or constant-run masking).
+        Am = A * ma   # (n, d) — zeroed where mask=0
+        Bm = B * mb   # (m, d)
+        D2 = (Am ** 2) @ mb.T + ma @ (Bm ** 2).T - 2.0 * Am @ Bm.T
         D2 = np.maximum(D2, 0.0)
 
         return D2, F
