@@ -187,33 +187,47 @@ def build_mask_matrix(X: np.ndarray) -> np.ndarray:
 
 class MaskedRBFKernel(Kernel):
     """
-    Jointly-Masked RBF kernel — only compares dimensions observed in both.
+    Jointly-Masked RBF kernel with additive missingness penalty.
 
-    Masks are precomputed via ``build_mask_matrix`` and passed to
-    ``gram`` / ``estimate_params`` explicitly, so they are computed
-    once and reused.
+    Masks are precomputed (via ``build_sample_mask`` stored in each
+    record, or ``build_mask_matrix``) and passed to ``gram`` /
+    ``estimate_params`` explicitly.
 
-        K(x_i, x_j) = exp( -||P_i P_j (x_i - x_j)||^2 / (2 σ^2 · ||P_i P_j||_F) )
+        K(x_i, x_j) = exp( -‖P_i P_j (x_i - x_j)‖² / (2σ²)
+                           - λ ‖I - P_i P_j‖_F² )
 
-    where P_i, P_j are diagonal observation masks (stored as columns
-    of the mask matrix P).
+    where P_i, P_j are diagonal binary observation masks.
+
+    The first term is a standard RBF on the jointly-observed
+    positions only.  The second term penalises missingness:
+    ‖I - P_i P_j‖_F² = d - shared_count  (number of positions
+    where at least one mask is 0).
 
     Properties:
-        - P_i = P_j = I (fully observed): reduces to standard RBF
-        - No shared observed dims → kernel = 0
-        - Frobenius norm normalises by effective dimensionality
+        - P_i = P_j = I (fully observed): penalty = 0, reduces to
+          standard RBF.
+        - Many masked positions → large penalty → kernel pushed
+          toward 0 ("I don't trust this comparison").
+        - No shared observed dims → kernel = 0.
+        - λ = 0 disables the penalty (pure masked distance).
 
-    Masks can now mark any position as unobserved, regardless of its
-    value — the distance computation zeroes out masked positions internally.
+    Masks can mark any position as unobserved, regardless of its
+    value — the distance computation zeroes out masked positions
+    internally.
 
     Parameters
     ----------
     lengthscale : float, optional
-        RBF bandwidth σ.  Auto-estimated via masked median heuristic if None.
+        RBF bandwidth σ.  Auto-estimated via median heuristic if None.
+    lam : float
+        Missingness penalty weight.  Default 1e-3.
+        Higher → more aggressive penalisation of pairs with many
+        masked positions.
     """
 
-    def __init__(self, lengthscale: float | None = None):
+    def __init__(self, lengthscale: float | None = None, lam: float = 1e-3):
         self.lengthscale = lengthscale
+        self.lam = lam
 
     # -- vectorised masked squared-distance matrix ---------------------
 
@@ -225,7 +239,7 @@ class MaskedRBFKernel(Kernel):
         P_b: np.ndarray,
     ):
         """
-        Compute masked squared distances and Frobenius norms.
+        Compute masked squared distances and shared observation counts.
 
         Parameters
         ----------
@@ -236,8 +250,8 @@ class MaskedRBFKernel(Kernel):
 
         Returns
         -------
-        D2  : (n, m)  masked squared Euclidean distances
-        F   : (n, m)  ||P_i P_j||_F  for each pair
+        D2           : (n, m)  masked squared Euclidean distances
+        shared_count : (n, m)  number of jointly-observed positions
         """
         A = np.asarray(A, dtype=float)
         B = np.asarray(B, dtype=float)
@@ -246,28 +260,29 @@ class MaskedRBFKernel(Kernel):
         ma = P_a.T   # (n, d)
         mb = P_b.T   # (m, d)
 
-        # ||P_i P_j||_F = sqrt( Σ_d  p_i[d] · p_j[d] )
-        shared_count = ma @ mb.T                      # (n, m)
-        F = np.sqrt(np.maximum(shared_count, 0.0))    # (n, m)
+        # Σ_k  p_i[k] · p_j[k]  — number of shared observed positions
+        shared_count = ma @ mb.T   # (n, m)
 
-        # ||P_i P_j (x_i - x_j)||^2
-        #   = Σ_d  p_i[d]·p_j[d]·(a[d]-b[d])^2
+        # ‖P_i P_j (x_i - x_j)‖²  =  Σ_k p_i[k]·p_j[k]·(a[k]-b[k])²
         #
         # Zero out data at unobserved positions so the vectorised
-        # expansion is correct even when masked values are non-zero
-        # (e.g. after Z-normalisation or constant-run masking).
+        # expansion is correct even when masked values are non-zero.
         Am = A * ma   # (n, d) — zeroed where mask=0
         Bm = B * mb   # (m, d)
         D2 = (Am ** 2) @ mb.T + ma @ (Bm ** 2).T - 2.0 * Am @ Bm.T
         D2 = np.maximum(D2, 0.0)
 
-        return D2, F
+        return D2, shared_count
 
     # -- median heuristic on masked distances --------------------------
 
     def estimate_params(self, X, rng, P=None):
         """
         Auto-estimate lengthscale from masked pairwise distances.
+
+        Uses the median of √D² over a random subset of training pairs.
+        No Frobenius normalisation — σ is calibrated to the raw masked
+        distance scale, matching the kernel formula.
 
         Parameters
         ----------
@@ -286,11 +301,10 @@ class MaskedRBFKernel(Kernel):
         sub = X[idx]
         sub_P = P[:, idx]    # (d, n_sub)
 
-        D2, F = self._masked_sq_dist(sub, sub, sub_P, sub_P)
-        safe_F = np.where(F > 0, F, 1.0)
-        eff_dist = np.sqrt(D2 / safe_F)
+        D2, shared_count = self._masked_sq_dist(sub, sub, sub_P, sub_P)
+        dists = np.sqrt(D2)
 
-        upper = eff_dist[np.triu_indices(n, k=1)]
+        upper = dists[np.triu_indices(n, k=1)]
         upper = upper[(upper > 0) & np.isfinite(upper)]
         self.lengthscale = float(np.median(upper)) if upper.size else 1.0
 
@@ -299,6 +313,8 @@ class MaskedRBFKernel(Kernel):
     def gram(self, A, B, P_a=None, P_b=None) -> np.ndarray:
         """
         Compute the masked RBF Gram matrix.
+
+        K(i,j) = exp( -D²/(2σ²) - λ·(d - shared_count) )
 
         Parameters
         ----------
@@ -322,12 +338,15 @@ class MaskedRBFKernel(Kernel):
         if P_b is None:
             P_b = build_mask_matrix(B)
 
-        D2, F = self._masked_sq_dist(A, B, P_a, P_b)
+        D2, shared_count = self._masked_sq_dist(A, B, P_a, P_b)
 
-        denom = 2.0 * self.lengthscale ** 2 * F
-        safe_denom = np.where(denom > 0, denom, 1.0)
-        G = np.exp(-D2 / safe_denom)
-        G = np.where(F > 0, G, 0.0)
+        d = A.shape[1]
+        rbf_term = D2 / (2.0 * self.lengthscale ** 2)
+        miss_penalty = self.lam * (d - shared_count)
+
+        G = np.exp(-rbf_term - miss_penalty)
+        # no shared observed dims → kernel = 0
+        G = np.where(shared_count > 0, G, 0.0)
 
         return G
 
