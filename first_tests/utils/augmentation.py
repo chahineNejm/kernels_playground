@@ -197,6 +197,20 @@ def uniform_length(
 # BATCH HELPER — augment prepared train examples
 # ===================================================================
 
+def _shift_mask(mask: np.ndarray, shift: int) -> np.ndarray:
+    """Shift a 1-D mask, marking new (filled) positions as unobserved (0)."""
+    mask = np.asarray(mask, dtype=np.float64).ravel()
+    n = len(mask)
+    if shift == 0 or n == 0:
+        return mask.copy()
+    out = np.zeros(n, dtype=np.float64)
+    if shift > 0:
+        out[shift:] = mask[:n - shift]
+    else:
+        out[:n + shift] = mask[-shift:]
+    return out
+
+
 def augment_train(
     train_records: list[dict[str, Any]],
     *,
@@ -207,7 +221,12 @@ def augment_train(
     seed: int = 0,
     feature_fn: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Augment **prepared** train examples by producing the full grid."""
+    """Augment **prepared** train examples by producing the full grid.
+
+    If records carry a ``'mask'`` key (1-D array of 0/1), it is
+    shifted together with the data so masked positions stay aligned.
+    Smoothing and jitter do not alter the mask.
+    """
     rng = np.random.default_rng(seed)
 
     shift_axis = [0] + (list(phase_shifts) if phase_shifts is not None else [])
@@ -224,7 +243,7 @@ def augment_train(
 
                     has_hist = "history_n" in new_rec
                     has_fut = "future_n" in new_rec
-                    
+
                     if not has_hist and not has_fut:
                         result.append(new_rec)
                         continue
@@ -236,15 +255,18 @@ def augment_train(
                         parts.append(np.asarray(new_rec["history_n"], dtype=np.float64).ravel())
                     if has_fut:
                         parts.append(np.asarray(new_rec["future_n"], dtype=np.float64).ravel())
-                    
+
                     arr = np.concatenate(parts)
                     hist_len = len(parts[0]) if has_hist else 0
 
                     if s != 0:
                         arr = apply_shift(arr, s, fill=phase_fill)
+                        # shift the mask so it stays aligned with the data
+                        if "mask" in new_rec:
+                            new_rec["mask"] = _shift_mask(new_rec["mask"], s)
                     if do_smooth:
                         arr = smooth(arr, window=smooth_window)
-                    
+
                     # Split back apart BEFORE applying independent noise
                     if has_hist:
                         hist_arr = arr[:hist_len]
@@ -256,15 +278,15 @@ def augment_train(
                             hist_arr = jitter(hist_arr, sigma=jitter_sigma, rng=rng)
                         if has_fut:
                             fut_arr = jitter(fut_arr, sigma=jitter_sigma, rng=rng)
-                    
-                    # FIX: Target Leakage. We re-calculate empirical statistics strictly 
+
+                    # FIX: Target Leakage. We re-calculate empirical statistics strictly
                     # from the history portion, and apply them identically to both arrays.
                     if has_hist:
                         mu = float(np.mean(hist_arr))
                         sigma = float(np.std(hist_arr))
                         if sigma < 1e-8:
                             sigma = 1.0
-                        
+
                         new_rec["history_n"] = (hist_arr - mu) / sigma
                         if has_fut:
                             new_rec["future_n"] = (fut_arr - mu) / sigma

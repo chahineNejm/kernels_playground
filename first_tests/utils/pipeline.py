@@ -19,6 +19,7 @@ from utils.config import DEFAULT_CONFIG
 from utils.data import build_examples, prepare_examples, resolve_config
 from utils.kernels import (
     Kernel,
+    MaskedRBFKernel,
     fit_kernel_operator,
     predict_kernel_operator,
     rmse,
@@ -249,9 +250,27 @@ def train_eval(
 
     y_train = np.stack([r["future_n"] for r in train_records])
 
+    # -- extract masks if present (for MaskedRBFKernel) --------
+    P_train = None
+    P_test = None
+    if isinstance(kernel, MaskedRBFKernel):
+        has_masks_train = all("mask" in r for r in train_records)
+        has_masks_test = all("mask" in r for r in test_records)
+        if has_masks_train:
+            P_train = np.stack([r["mask"] for r in train_records]).T  # (d, n_train)
+        if has_masks_test:
+            P_test = np.stack([r["mask"] for r in test_records]).T    # (d, n_test)
+        if verbose:
+            if has_masks_train:
+                sparsity = 1.0 - P_train.mean()
+                print(f"[{domain}] masks: {sparsity:.1%} of dimensions masked (train)")
+            else:
+                print(f"[{domain}] masks: no 'mask' key in records, falling back to zero-check")
+
     # -- fit ---------------------------------------------------
     rng = np.random.default_rng(seed)
-    model = fit_kernel_operator(x_train, y_train, gamma=gamma, rng=rng, kernel=kernel)
+    model = fit_kernel_operator(x_train, y_train, gamma=gamma, rng=rng,
+                                kernel=kernel, P_train=P_train)
 
     if verbose:
         ls_str = f"l={model['lengthscale']:.4f}" if model["lengthscale"] else ""
@@ -264,7 +283,8 @@ def train_eval(
     except ValueError:
         x_test = x_items_test  # variable shapes → list for DTW etc.
 
-    y_pred_all_n = predict_kernel_operator(model, x_test)  # (n_test, future_len)
+    y_pred_all_n = predict_kernel_operator(model, x_test,
+                                           P_query=P_test)  # (n_test, future_len)
 
     predictions: list[dict[str, Any]] = []
     for i, rec in enumerate(test_records):

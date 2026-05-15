@@ -129,31 +129,57 @@ class RBFKernel(Kernel):
 # MASKED RBF KERNEL  (jointly-masked RBF for missing dimensions)
 # ═══════════════════════════════════════════════════════════════
 
-def build_mask_matrix(X: np.ndarray) -> np.ndarray:
+def build_sample_mask(x: np.ndarray, min_run: int = 5) -> np.ndarray:
     """
-    Build observation masks from data.
+    Build an observation mask for a single 1-D series.
 
-    Each sample's mask is a 1-D binary vector: 1 where the value is
-    non-zero (observed), 0 where it is zero (missing).
+    A position is marked as unobserved (0) if:
+      - the value is exactly zero, OR
+      - it belongs to a constant run of length >= min_run
 
     Parameters
     ----------
-    X : (n_samples, d) array
+    x : 1-D array
+    min_run : int
+        Minimum length of a constant stretch to be flagged as
+        non-informative.  Default 5.
+
+    Returns
+    -------
+    mask : 1-D array of 0s and 1s, same length as x.
+    """
+    x = np.asarray(x, dtype=float).ravel()
+    d = len(x)
+    mask = np.ones(d, dtype=np.float64)
+
+    # mark exact zeros
+    mask[x == 0] = 0.0
+
+    # mark constant runs
+    if min_run >= 2 and d >= min_run:
+        j = 0
+        while j < d:
+            k = j + 1
+            while k < d and x[k] == x[j]:
+                k += 1
+            if k - j >= min_run:
+                mask[j:k] = 0.0
+            j = k
+
+    return mask
+
+
+def build_mask_matrix(X: np.ndarray) -> np.ndarray:
+    """
+    Build observation masks from a (n_samples, d) data matrix.
+
+    Legacy function — uses only the zero check.  Prefer storing
+    per-sample masks via ``build_sample_mask`` in each record's
+    'mask' key for the full constant-run detection.
 
     Returns
     -------
     P : (d, n_samples) array
-        Column j is the mask vector for sample j.
-        Compact storage: one column per sample, easy to slice.
-
-    Usage
-    -----
-    >>> P_train = build_mask_matrix(X_train)    # (d, n_train)
-    >>> P_test  = build_mask_matrix(X_test)     # (d, n_test)
-    >>> kernel  = MaskedRBFKernel()
-    >>> kernel.estimate_params(X_train, rng, P_train)
-    >>> G_train = kernel.gram(X_train, X_train, P_train, P_train)
-    >>> G_test  = kernel.gram(X_test, X_train, P_test, P_train)
     """
     X = np.asarray(X, dtype=float)
     return (X != 0).astype(np.float64).T   # (d, n)
